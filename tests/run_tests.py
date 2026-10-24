@@ -256,6 +256,7 @@ class FakeEvent:
         umo: str = "aiocqhttp:group:123",
         message_id: str | None = None,
         timestamp: int | None = None,
+        sender: str = "u1",
     ) -> None:
         """初始化。
 
@@ -264,18 +265,59 @@ class FakeEvent:
             umo: 统一消息来源。
             message_id: 平台消息 ID；不传时自动生成一个递增 ID。
             timestamp: 消息时间戳；不传时用当前时间。
+            sender: 发送者 ID（聚合按「会话 + 发送者」分桶）。
         """
         FakeEvent._seq += 1
         self.message_str = text
         self.unified_msg_origin = umo
         self.sent: list[str] = []
         self.extras: dict = {}
+        self._stopped = False
+        self._sender = sender
         # 真实的 AstrMessageEvent 带 message_obj（含 message_id / timestamp），
-        # 去重逻辑依赖它；这里照实模拟。
+        # 去重逻辑依赖它；这里照实模拟。`message=[]` 让解析层退回 message_str。
         self.message_obj = SimpleNamespace(
             message_id=message_id if message_id is not None else f"m{FakeEvent._seq}",
             timestamp=timestamp if timestamp is not None else FakeEvent._seq,
+            message=[],
+            raw_message=None,
         )
+
+    def stop_event(self) -> None:
+        """静默事件（聚合插件对非 Owner 消息的公开 API）。"""
+        self._stopped = True
+
+    def is_stopped(self) -> bool:
+        """事件是否已被静默。
+
+        Returns:
+            True 表示已停止传播。
+        """
+        return self._stopped
+
+    def get_sender_id(self) -> str:
+        """发送者 ID（聚合分桶用）。
+
+        Returns:
+            发送者标识。
+        """
+        return self._sender
+
+    def get_self_id(self) -> str:
+        """机器人自己的 ID（剥除 @ 用）。
+
+        Returns:
+            固定值。
+        """
+        return "bot"
+
+    def is_private_chat(self) -> bool:
+        """是否私聊（聚合的渠道统计用）。
+
+        Returns:
+            True 表示私聊。
+        """
+        return ":FriendMessage:" in self.unified_msg_origin or "private" in self.unified_msg_origin
 
     def get_platform_id(self) -> str:
         """平台 ID。
@@ -332,6 +374,10 @@ class FakeEvent:
 def make_plugin(module, context: FakeContext, config: dict):
     """构造插件实例。
 
+    v0.9.0 起插件默认开启内建消息聚合；本文件绝大多数用例验证的是"逐条判定"
+    的语义（去重、模型调用、模式动作），因此默认显式关闭聚合，保持用例口径不变。
+    聚合整合本身的用例在 `[19]`，会显式传开启的配置。
+
     Args:
         module: 插件模块。
         context: 假上下文。
@@ -340,7 +386,9 @@ def make_plugin(module, context: FakeContext, config: dict):
     Returns:
         插件实例。
     """
-    return module.TopicRouterPlugin(context, config)
+    merged = dict(config)
+    merged.setdefault("aggregation", {"enabled": False})
+    return module.TopicRouterPlugin(context, merged)
 
 
 MODULE = None
@@ -377,6 +425,8 @@ def reset_runtime() -> None:
     module.RUNTIME.store = module.TopicStore(data_dir / "topic_state.json")
     module.RUNTIME.recent = {}
     module.RUNTIME.pending_actions = {}
+    module.RUNTIME.aggregation = None
+    module.RUNTIME.aggregation_error = ""
 
 
 async def run_detect(plugin, event, req=None):
@@ -395,10 +445,10 @@ async def run_detect(plugin, event, req=None):
         event: 消息事件。
         req: `ProviderRequest`，为 None 时只走消息事件路径。
     """
-    async for _ in MODULE.handle_message_v017(event):
+    async for _ in MODULE.handle_message_v090(event):
         pass
     if req is not None:
-        await MODULE.hook_llm_request_v017(event, req)
+        await MODULE.hook_llm_request_v090(event, req)
 
 
 async def test_metadata(module, tmp_root: Path) -> None:
@@ -425,13 +475,25 @@ async def test_metadata(module, tmp_root: Path) -> None:
     schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8"))
     check("schema 默认 mode 是 mark", schema["mode"]["default"] == "mark")
     for key, item in schema.items():
-        ok = (
-            isinstance(item, dict)
-            and "description" in item
-            and "default" in item
-            and "type" in item
+        if not isinstance(item, dict) or "description" not in item or "type" not in item:
+            check(f"schema.{key} 字段合法", False, str(item)[:80])
+            continue
+        # 对象型分组（如 aggregation）没有顶层 default，默认值在 items 里
+        ok = "default" in item or (
+            item.get("type") == "object" and isinstance(item.get("items"), dict)
         )
         check(f"schema.{key} 字段合法", ok, str(item)[:80])
+    agg = schema.get("aggregation", {})
+    check("schema 含 aggregation 分组", agg.get("type") == "object")
+    check(
+        "聚合默认开启（整合后的默认形态）",
+        agg.get("items", {}).get("enabled", {}).get("default") is True,
+    )
+    check(
+        "聚合配置项与独立插件对齐（至少 25 项）",
+        len(agg.get("items", {})) >= 25,
+        str(len(agg.get("items", {}))),
+    )
     check(
         "mode 选项包含四档",
         schema["mode"]["options"] == ["off", "mark", "hint", "auto"],
@@ -645,7 +707,7 @@ async def test_provider_id_fallback(module) -> None:
     ctx4 = FakeContext()
     make_plugin(module, ctx4, {"mode": "mark", "provider_id": "不存在的模型"})
     event4 = FakeEvent("帮我看下硬盘坏了没", "aiocqhttp:group:pf2")
-    async for _ in MODULE.handle_message_v017(event4):
+    async for _ in MODULE.handle_message_v090(event4):
         pass
     check(
         "回退之后模型判定依然执行（不是静默失效）",
@@ -883,7 +945,7 @@ async def test_request_hook_alone(module) -> None:
     # 提示词按判定器的格式拼，钩子才抠得出用户消息
     prompt = f"当前话题：（还没有话题）\n用户最新消息：{event.message_str}\n请输出判定 JSON。"
     req = ProviderRequest(prompt=prompt)
-    await MODULE.hook_llm_request_v017(event, req)
+    await MODULE.hook_llm_request_v090(event, req)
 
     check(
         "钩子单独调用也完成了判定（不依赖消息事件）",
@@ -899,7 +961,7 @@ async def test_request_hook_alone(module) -> None:
     # 事件路先跑同一条消息：钩子不该把它再判一次
     turns_before = state_store().get(umo).turns
     req2 = ProviderRequest(prompt=prompt)
-    await MODULE.hook_llm_request_v017(event, req2)
+    await MODULE.hook_llm_request_v090(event, req2)
     check(
         "事件路已判过的消息，钩子不重复判定",
         state_store().get(umo).turns == turns_before,
@@ -907,7 +969,7 @@ async def test_request_hook_alone(module) -> None:
     )
 
     # 消息事件路本身：同一条消息重复到达按消息 ID 去重
-    async for _ in MODULE.handle_message_v017(event):
+    async for _ in MODULE.handle_message_v090(event):
         pass
     check(
         "重复到达的消息被跳过",
@@ -917,7 +979,7 @@ async def test_request_hook_alone(module) -> None:
 
     # 用户真的把同一句话又发了一遍（新的消息 id）→ 应该算新的一轮
     same_text_again = FakeEvent("帮我写个爬虫抓豆瓣", umo)
-    async for _ in MODULE.handle_message_v017(same_text_again):
+    async for _ in MODULE.handle_message_v090(same_text_again):
         pass
     check(
         "用户重发同样的话算新一轮",
@@ -1066,7 +1128,7 @@ async def test_topic_command(module) -> None:
         """
         ev = FakeEvent(message, umo)
         out = []
-        async for result in MODULE.command_topic_v017(ev):
+        async for result in MODULE.command_topic_v090(ev):
             out.append(result["text"])
         return out
 
@@ -1102,7 +1164,7 @@ async def test_entry_points(module) -> None:
     from astrbot.api.provider import ProviderRequest
 
     mod = MODULE
-    seen = inspect.signature(mod.handle_message_v017)
+    seen = inspect.signature(mod.handle_message_v090)
     seen_params = list(seen.parameters.values())
     seen_required = [
         p.name
@@ -1123,7 +1185,7 @@ async def test_entry_points(module) -> None:
         str([(p.name, p.kind.name) for p in seen_params]),
     )
 
-    hook = inspect.signature(mod.hook_llm_request_v017)
+    hook = inspect.signature(mod.hook_llm_request_v090)
     params = list(hook.parameters.values())
     required = [
         p.name
@@ -1145,7 +1207,7 @@ async def test_entry_points(module) -> None:
     )
     # 这条是给未来改代码的人（包括我自己）的警告：AstrBot 按"模块+函数名"复用
     # handler 元数据，方法名一旦叫回 on_llm_request，就会命中旧条目、新代码永不生效。
-    hook_name = MODULE.hook_llm_request_v017.__name__
+    hook_name = MODULE.hook_llm_request_v090.__name__
     check("请求钩子的方法名不是 on_llm_request", hook_name != "on_llm_request", hook_name)
     check(
         "请求钩子的方法名带版本号",
@@ -1159,7 +1221,7 @@ async def test_entry_points(module) -> None:
     fresh_data_root("entries-bare")
     context = FakeContext()
     plugin = make_plugin(module, context, {"mode": "mark"})
-    await MODULE.hook_llm_request_v017(FakeEvent("你好", umo))
+    await MODULE.hook_llm_request_v090(FakeEvent("你好", umo))
     check("钩子只传 event 不抛异常", True)
 
     # 位置参数 / 关键字参数里的请求都能认出来
@@ -1168,9 +1230,9 @@ async def test_entry_points(module) -> None:
     plugin_pos = make_plugin(module, ctx_pos, {"mode": "hint"})
     ev_pos = FakeEvent("帮我写个爬虫抓豆瓣", umo)
     real_req = ProviderRequest(prompt=ev_pos.message_str)
-    async for _ in MODULE.handle_message_v017(ev_pos):
+    async for _ in MODULE.handle_message_v090(ev_pos):
         pass
-    await MODULE.hook_llm_request_v017(ev_pos, real_req)
+    await MODULE.hook_llm_request_v090(ev_pos, real_req)
     check(
         "位置参数里的请求被认出来",
         len(real_req.extra_user_content_parts) == 1,
@@ -1182,9 +1244,9 @@ async def test_entry_points(module) -> None:
     plugin_kw = make_plugin(module, ctx_kw, {"mode": "hint"})
     ev_kw = FakeEvent("帮我写个爬虫抓豆瓣", umo)
     kw_req = ProviderRequest(prompt=ev_kw.message_str)
-    async for _ in MODULE.handle_message_v017(ev_kw):
+    async for _ in MODULE.handle_message_v090(ev_kw):
         pass
-    await MODULE.hook_llm_request_v017(ev_kw, req=kw_req)
+    await MODULE.hook_llm_request_v090(ev_kw, req=kw_req)
     check(
         "关键字参数里的请求被认出来",
         len(kw_req.extra_user_content_parts) == 1,
@@ -1199,11 +1261,11 @@ async def test_entry_points(module) -> None:
     plugin_unbound = make_plugin(module, ctx_unbound, {"mode": "hint"})
     ev_unbound = FakeEvent("帮我写个爬虫抓豆瓣", umo)
     req_unbound = ProviderRequest(prompt=ev_unbound.message_str)
-    async for _ in MODULE.handle_message_v017(ev_unbound):
+    async for _ in MODULE.handle_message_v090(ev_unbound):
         pass
     unbound_ok = True
     try:
-        await MODULE.hook_llm_request_v017(ev_unbound, req_unbound)
+        await MODULE.hook_llm_request_v090(ev_unbound, req_unbound)
     except Exception as exc:  # noqa: BLE001 - 就是要看它会不会炸
         unbound_ok = False
         print(f"       [debug] 未绑定调用抛了: {type(exc).__name__}: {exc}")
@@ -1220,7 +1282,7 @@ async def test_entry_points(module) -> None:
     make_plugin(module, ctx_reqonly, {"mode": "hint"})
     req_only = ProviderRequest(prompt="只有请求")
     try:
-        await MODULE.hook_llm_request_v017(req_only)
+        await MODULE.hook_llm_request_v090(req_only)
         check("只有 ProviderRequest 时不抛异常", True)
     except Exception as exc:  # noqa: BLE001
         check("只有 ProviderRequest 时不抛异常", False, f"{type(exc).__name__}: {exc}")
@@ -1230,9 +1292,9 @@ async def test_entry_points(module) -> None:
     ctx_noreq = FakeContext()
     plugin_noreq = make_plugin(module, ctx_noreq, {"mode": "hint"})
     ev_noreq = FakeEvent("帮我写个爬虫抓豆瓣", umo)
-    async for _ in MODULE.handle_message_v017(ev_noreq):
+    async for _ in MODULE.handle_message_v090(ev_noreq):
         pass
-    await MODULE.hook_llm_request_v017(ev_noreq)
+    await MODULE.hook_llm_request_v090(ev_noreq)
     check("钩子只拿到事件时不抛异常", True)
     check("拿不到请求时不换对话", ctx_noreq.conversation_manager.new_calls == [])
 
@@ -1242,8 +1304,8 @@ async def test_handlers_are_module_level(module) -> None:
 
     实机证据（AstrBot 4.28.1）：
 
-        hook(on_astrbot_loaded) -> None - on_loaded_v017
-        TypeError: TopicRouterPlugin.on_loaded_v017() missing 1 required positional
+        hook(on_astrbot_loaded) -> None - on_loaded_v090
+        TypeError: TopicRouterPlugin.on_loaded_v090() missing 1 required positional
                    argument: 'self'
 
     AstrBot 用 `await handler.handler()` 直接调用、**不传 self**。正常环境里注册表存的
@@ -1254,10 +1316,10 @@ async def test_handlers_are_module_level(module) -> None:
 
     print("\n[12] handler 的形态（实机踩过的坑）")
     for name in (
-        "handle_message_v017",
-        "hook_llm_request_v017",
-        "command_topic_v017",
-        "on_loaded_v017",
+        "handle_message_v090",
+        "hook_llm_request_v090",
+        "command_topic_v090",
+        "on_loaded_v090",
     ):
         func = getattr(MODULE, name)
         params = list(inspect.signature(func).parameters.values())
@@ -1275,11 +1337,11 @@ async def test_handlers_are_module_level(module) -> None:
     fresh_data_root("module-level-onloaded")
     ok = True
     try:
-        await MODULE.on_loaded_v017()
+        await MODULE.on_loaded_v090()
     except Exception as exc:  # noqa: BLE001 - 就是要看它炸不炸
         ok = False
-        print(f"       [debug] on_loaded_v017() 抛了: {type(exc).__name__}: {exc}")
-    check("on_loaded_v017() 零参数调用不报错（复现 missing 'self' 的那条路径）", ok)
+        print(f"       [debug] on_loaded_v090() 抛了: {type(exc).__name__}: {exc}")
+    check("on_loaded_v090() 零参数调用不报错（复现 missing 'self' 的那条路径）", ok)
 
     # 消息 handler：零参数、只传事件、多传一个 self 都要安全
     for label, call_args in (
@@ -1292,11 +1354,11 @@ async def test_handlers_are_module_level(module) -> None:
     ):
         fresh_data_root("module-level-msg")
         try:
-            async for _ in MODULE.handle_message_v017(*call_args):
+            async for _ in MODULE.handle_message_v090(*call_args):
                 pass
-            check(f"handle_message_v017 {label} 不抛异常", True)
+            check(f"handle_message_v090 {label} 不抛异常", True)
         except Exception as exc:  # noqa: BLE001
-            check(f"handle_message_v017 {label} 不抛异常", False, f"{type(exc).__name__}: {exc}")
+            check(f"handle_message_v090 {label} 不抛异常", False, f"{type(exc).__name__}: {exc}")
 
 
 async def test_cross_path_dedup(module) -> None:
@@ -1320,10 +1382,10 @@ async def test_cross_path_dedup(module) -> None:
     make_plugin(module, FakeContext(), {"mode": "mark"})
     umo = "aiocqhttp:FriendMessage:crosspath"
     event = FakeEvent("帮我看下硬盘坏了没", umo, message_id="m100", timestamp=100)
-    async for _ in MODULE.handle_message_v017(event):
+    async for _ in MODULE.handle_message_v090(event):
         pass
     turns_a = state_store().get(umo).turns
-    async for _ in MODULE.handle_message_v017(event):
+    async for _ in MODULE.handle_message_v090(event):
         pass
     turns_b = state_store().get(umo).turns
     check("同一消息 ID 重复到达只算一轮", turns_a == 1 and turns_b == 1, f"{turns_a} -> {turns_b}")
@@ -1332,13 +1394,13 @@ async def test_cross_path_dedup(module) -> None:
     req = ProviderRequest(
         prompt=f"当前话题：x\n用户最新消息：{event.message_str}\n请输出判定 JSON。"
     )
-    await MODULE.hook_llm_request_v017(event, req)
+    await MODULE.hook_llm_request_v090(event, req)
     check("事件路刚判过，钩子不重复判", state_store().get(umo).turns == 1,
           f"turns={state_store().get(umo).turns}")
 
     # --- 方向三：用户重发同一句话（新的消息 ID）→ 必须算新一轮
     resent = FakeEvent("帮我看下硬盘坏了没", umo, message_id="m101", timestamp=101)
-    async for _ in MODULE.handle_message_v017(resent):
+    async for _ in MODULE.handle_message_v090(resent):
         pass
     check(
         "用户重发同一句话算新一轮（不能被文本去重吞掉）",
@@ -1351,7 +1413,7 @@ async def test_cross_path_dedup(module) -> None:
     make_plugin(module, FakeContext(), {"mode": "mark"})
     umo2 = "aiocqhttp:FriendMessage:crosspath2"
     event2 = FakeEvent("帮我写个爬虫抓豆瓣", umo2, message_id="m200", timestamp=200)
-    await MODULE.hook_llm_request_v017(
+    await MODULE.hook_llm_request_v090(
         event2,
         ProviderRequest(prompt=f"用户最新消息：{event2.message_str}\n请输出判定 JSON。"),
     )
@@ -1372,7 +1434,7 @@ async def test_hook_with_event(module) -> None:
     "钩子只有 ProviderRequest"（老版本形态）是两条不同的代码路径，必须分别钉住。
 
     实机证据（用户 v2.0 报告 §8.5）：
-        hook_llm_request_v017 被调用 | has_event=True | has_request=True
+        hook_llm_request_v090 被调用 | has_event=True | has_request=True
         | args=['WeixinOCMessageEvent', 'ProviderRequest']
     框架侧对应 `call_event_hook` 的 `await handler.handler(event, *args)`。
 
@@ -1390,7 +1452,7 @@ async def test_hook_with_event(module) -> None:
         prompt=f"当前话题：（还没有话题）\n用户最新消息：{event.message_str}\n请输出判定 JSON。"
     )
     # 与框架一致：事件在前，请求在后
-    await MODULE.hook_llm_request_v017(event, req)
+    await MODULE.hook_llm_request_v090(event, req)
     turns = state_store().get(umo).turns
     check("钩子带事件也能完成判定", turns == 1, f"turns={turns}")
 
@@ -1402,7 +1464,7 @@ async def test_hook_with_event(module) -> None:
     )
 
     # 同一事件再次从钩子到达 → 不该重复判定
-    await MODULE.hook_llm_request_v017(event, ProviderRequest(prompt=req.prompt))
+    await MODULE.hook_llm_request_v090(event, ProviderRequest(prompt=req.prompt))
     check(
         "同一条消息重复到达钩子不重复判定",
         state_store().get(umo).turns == 1,
@@ -1411,7 +1473,7 @@ async def test_hook_with_event(module) -> None:
 
     # 用户重发同一句话（新消息 ID）→ 必须算新一轮
     again = FakeEvent("看看修好了吗", umo, message_id="mwh2", timestamp=901)
-    await MODULE.hook_llm_request_v017(again, ProviderRequest(prompt=req.prompt))
+    await MODULE.hook_llm_request_v090(again, ProviderRequest(prompt=req.prompt))
     check(
         "钩子路下重发同一句话也算新一轮",
         state_store().get(umo).turns == 2,
@@ -1437,7 +1499,7 @@ async def test_hook_prompt_fallback(module) -> None:
     # 不出事件，只给请求：走 _hook_user_message 的 prompt 抠取分支
     prompt = "当前话题：（还没有话题）\n用户最新消息：帮我看看硬盘挂了没\n请输出判定 JSON。"
     req = ProviderRequest(prompt=prompt)
-    await MODULE.hook_llm_request_v017(req)
+    await MODULE.hook_llm_request_v090(req)
 
     # 没有事件时 umo 只能从 req.conversation 推，推不到就按 cid 隔离；
     # 这里只断言"判定确实发生了"，即状态里出现任意一条带轮数的记录
@@ -1459,7 +1521,7 @@ async def test_hook_prompt_fallback(module) -> None:
     # 提示词里没有标记时，退回"整段提示词足够短就当作消息"
     fresh_data_root("hook-prompt-no-marker")
     make_plugin(module, FakeContext(), {"mode": "mark"})
-    await MODULE.hook_llm_request_v017(ProviderRequest(prompt="顺便看看代理池"))
+    await MODULE.hook_llm_request_v090(ProviderRequest(prompt="顺便看看代理池"))
     states2 = getattr(MODULE.RUNTIME.store, "_states", {})
     judged2 = [s for s in states2.values() if s.turns > 0]
     check(
@@ -1716,7 +1778,7 @@ async def test_trace_landing(module) -> None:
     make_plugin(module, FakeContext(), {"mode": "mark", "trace_enabled": True})
     umo = "aiocqhttp:FriendMessage:trace"
     event = FakeEvent("帮我看下硬盘坏了没", umo, message_id="m400", timestamp=400)
-    async for _ in MODULE.handle_message_v017(event):
+    async for _ in MODULE.handle_message_v090(event):
         pass
     trace_path = root / "plugin_data" / "astrbot_plugin_topic_router_pro" / "trace.log"
     check("trace.log 已生成", trace_path.exists(), str(trace_path))
@@ -1728,10 +1790,280 @@ async def test_trace_landing(module) -> None:
     root2 = fresh_data_root("trace-off")
     make_plugin(module, FakeContext(), {"mode": "mark", "trace_enabled": False})
     event2 = FakeEvent("关掉开关的消息", "aiocqhttp:FriendMessage:notrace", message_id="m401", timestamp=401)
-    async for _ in MODULE.handle_message_v017(event2):
+    async for _ in MODULE.handle_message_v090(event2):
         pass
     off_path = root2 / "plugin_data" / "astrbot_plugin_topic_router_pro" / "trace.log"
     check("关闭 trace_enabled 后不产生 trace.log", not off_path.exists(), str(off_path))
+
+
+async def test_aggregation_integration(module) -> None:
+    """验证内建消息聚合与话题判定的流水线衔接。
+
+    覆盖四件事：
+
+    1. 聚合默认开启、配置默认值与 `_conf_schema.json` 逐项一致；
+    2. 连续两条消息只推进**一轮**话题，且 Owner 事件被重构为合并文本；
+    3. 补充消息被静默（不产生第二次 LLM 调用），请求钩子也不会重复判定；
+    4. `aggregation.enabled=false` 时退回逐条判定。
+
+    Args:
+        module: 插件模块。
+    """
+    print("\n[19] 内建消息聚合（整合自 astrbot_plugin_msg_aggregator）")
+    root = fresh_data_root("aggregation")
+    ctx = FakeContext()
+    plugin = make_plugin(
+        module,
+        ctx,
+        {
+            "mode": "mark",
+            "provider_id": "",
+            "aggregation": {
+                "enabled": True,
+                "debounce_time": 0.3,
+                "adaptive": False,
+                "group_enabled": True,
+                "page_enabled": False,
+            },
+        },
+    )
+    service = MODULE.RUNTIME.aggregation
+    check("聚合开启时创建服务", service is not None)
+    if service is None:
+        return
+    await plugin.initialize()
+    check("插件 initialize 启动了聚合后台任务", service._started)
+
+    check(
+        "聚合数据落在插件自己的 plugin_data 下",
+        str(service.stats.path).startswith(str(root)),
+        str(service.stats.path),
+    )
+
+    # 配置默认值与 schema 必须逐项一致（独立插件里这条是硬约束，迁入后保持）
+    agg_cfg = sys.modules[
+        "data.plugins.astrbot_plugin_topic_router_pro.aggregation.config"
+    ]
+    schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8"))
+    items = schema["aggregation"]["items"]
+    defaults = agg_cfg.Config()
+    mismatch = []
+    for name in agg_cfg.Config.__dataclass_fields__:
+        want = getattr(defaults, name)
+        got = items.get(name, {}).get("default")
+        if want != got:
+            mismatch.append(f"{name}: code={want!r} schema={got!r}")
+    check("聚合 Config 默认值与 schema 一致", not mismatch, "; ".join(mismatch[:5]))
+
+    umo = "aiocqhttp:FriendMessage:agg"
+    e1 = FakeEvent("帮我看看 NAS 硬盘", umo, message_id="agg1", timestamp=1)
+    e2 = FakeEvent("好像有点响", umo, message_id="agg2", timestamp=2)
+
+    async def run(ev) -> None:
+        """驱动一次消息入口。
+
+        Args:
+            ev: 消息事件。
+        """
+        async for _ in MODULE.handle_message_v090(ev):
+            pass
+
+    task1 = asyncio.create_task(run(e1))
+    await asyncio.sleep(0.05)
+    task2 = asyncio.create_task(run(e2))
+    await asyncio.wait_for(asyncio.gather(task1, task2), timeout=3.0)
+
+    check("补充消息被静默（不进入下游）", e2.is_stopped())
+    check("Owner 未被静默（继续流向 LLM）", not e1.is_stopped())
+    check(
+        "事件被重构为合并文本",
+        e1.message_str == "帮我看看 NAS 硬盘\n好像有点响",
+        repr(e1.message_str),
+    )
+    state = MODULE.RUNTIME.store.get(umo)
+    check("两句话只推进一轮话题", state.turns == 1, f"turns={state.turns}")
+
+    # 钩子在同一事件上再触发：已判过，不得把 turns 推成 2
+    req = ProviderRequest(prompt="用户最新消息：帮我看看 NAS 硬盘\n好像有点响\n请输出判定 JSON。")
+    await MODULE.hook_llm_request_v090(e1, req)
+    check(
+        "聚合后的请求钩子不重复判定",
+        MODULE.RUNTIME.store.get(umo).turns == 1,
+        f"turns={MODULE.RUNTIME.store.get(umo).turns}",
+    )
+
+    check(
+        "统计记录了一次结算",
+        service.stats.flush_total == 1,
+        f"flush_total={service.stats.flush_total}",
+    )
+    check(
+        "统计记录了两条入桶消息",
+        service.stats.items_total == 2,
+        f"items_total={service.stats.items_total}",
+    )
+
+    # 页面后端：只验证路由注册（真实渲染由 Dashboard 负责）
+    class FakeWebCtx:
+        """只提供 register_web_api 的假上下文。"""
+
+        def __init__(self) -> None:
+            self.routes: list[tuple[str, tuple[str, ...]]] = []
+
+        def register_web_api(self, route, handler, methods, desc) -> None:
+            self.routes.append((route, tuple(methods)))
+
+    from data.plugins.astrbot_plugin_topic_router_pro.aggregation import web_api
+
+    service.cfg.page_enabled = True
+    web_ctx = FakeWebCtx()
+    web_api.register(web_ctx, service)
+    check(
+        "页面后端注册 7 个路由",
+        len(web_ctx.routes) == 7,
+        str(web_ctx.routes),
+    )
+    check(
+        "路由以插件名开头",
+        all(
+            route.startswith("/astrbot_plugin_topic_router_pro/")
+            for route, _ in web_ctx.routes
+        ),
+        str(web_ctx.routes),
+    )
+
+    await service.shutdown()
+    MODULE.RUNTIME.aggregation = None
+
+    # ---- 入口被抢占：钩子兜底判定 + 抢占计数 ----
+    root2 = fresh_data_root("aggregation-preempted")
+    make_plugin(
+        MODULE,
+        FakeContext(),
+        {
+            "mode": "mark",
+            "trace_enabled": True,
+            "aggregation": {
+                "enabled": True,
+                "debounce_time": 0.05,
+                "adaptive": False,
+                "page_enabled": False,
+            },
+        },
+    )
+    service2 = MODULE.RUNTIME.aggregation
+    check("抢占场景下聚合服务仍在", service2 is not None)
+    if service2 is not None:
+        stolen = FakeEvent(
+            "被更高优先级插件截走的消息",
+            "aiocqhttp:FriendMessage:preempted",
+            message_id="pre1",
+            timestamp=4,
+        )
+        # 不调用消息入口，直接走请求钩子：模拟"入口在派发循环里没被调用"
+        await MODULE.hook_llm_request_v090(
+            stolen,
+            ProviderRequest(prompt="用户最新消息：被更高优先级插件截走的消息\n请输出判定 JSON。"),
+        )
+        check(
+            "入口未跑时钩子仍完成判定",
+            MODULE.RUNTIME.store.get("aiocqhttp:FriendMessage:preempted").turns == 1,
+        )
+        check(
+            "抢占计数被记录",
+            service2.stats.preempted_total == 1,
+            str(getattr(service2.stats, "preempted_total", "?")),
+        )
+        trace_path = (
+            root2
+            / "plugin_data"
+            / "astrbot_plugin_topic_router_pro"
+            / "trace.log"
+        )
+        body = trace_path.read_text(encoding="utf-8") if trace_path.exists() else ""
+        check("抢占证据落盘（PREEMPTED）", "PREEMPTED" in body, body[-300:])
+        await service2.shutdown()
+        MODULE.RUNTIME.aggregation = None
+
+    # ---- 关闭聚合：退回逐条判定 ----
+    fresh_data_root("aggregation-off")
+    make_plugin(
+        module,
+        FakeContext(),
+        {"mode": "mark", "aggregation": {"enabled": False}},
+    )
+    check("关闭聚合时不创建服务", MODULE.RUNTIME.aggregation is None)
+    event = FakeEvent(
+        "聚合关闭后的消息",
+        "aiocqhttp:FriendMessage:noagg",
+        message_id="noagg1",
+        timestamp=3,
+    )
+    async for _ in MODULE.handle_message_v090(event):
+        pass
+    check(
+        "关闭聚合后仍逐条判定",
+        MODULE.RUNTIME.store.get("aiocqhttp:FriendMessage:noagg").turns == 1,
+    )
+
+    # ---- 聚合后 hint 动作仍然要执行（“先聚合、再判定、最后改写请求”全链路） ----
+    fresh_data_root("aggregation-hint")
+    ctx_h = FakeContext()
+    make_plugin(
+        MODULE,
+        ctx_h,
+        {
+            "mode": "hint",
+            "provider_id": "",
+            "aggregation": {
+                "enabled": True,
+                "debounce_time": 0.05,
+                "adaptive": False,
+                "page_enabled": False,
+            },
+        },
+    )
+    service_h = MODULE.RUNTIME.aggregation
+    check("hint 场景下聚合服务已创建", service_h is not None)
+    if service_h is not None:
+        hint_event = FakeEvent(
+            "帮我写个 Python 脚本",
+            "aiocqhttp:FriendMessage:agghint",
+            message_id="hint1",
+            timestamp=5,
+        )
+        async for _ in MODULE.handle_message_v090(hint_event):
+            pass
+        check(
+            "聚合后新话题判定已挂起 hint 动作",
+            "aiocqhttp:FriendMessage:agghint" in MODULE.RUNTIME.pending_actions,
+            str(MODULE.RUNTIME.pending_actions.keys()),
+        )
+        hint_req = ProviderRequest(prompt="用户最新消息：帮我写个 Python 脚本\n请输出判定 JSON。")
+        await MODULE.hook_llm_request_v090(hint_event, hint_req)
+        check(
+            "请求钩子执行了 hint 注入",
+            len(hint_req.extra_user_content_parts) >= 1,
+            str(hint_req.extra_user_content_parts),
+        )
+        check(
+            "hint 动作执行后被消费",
+            "aiocqhttp:FriendMessage:agghint" not in MODULE.RUNTIME.pending_actions,
+        )
+        await service_h.shutdown()
+        MODULE.RUNTIME.aggregation = None
+
+    # ---- 总开关关闭：聚合也不能偷偷缓冲/静默消息 ----
+    fresh_data_root("plugin-off")
+    make_plugin(
+        MODULE,
+        FakeContext(),
+        {"enabled": False, "aggregation": {"enabled": True}},
+    )
+    check(
+        "插件总开关关闭时聚合不启动",
+        MODULE.RUNTIME.aggregation is None,
+    )
 
 
 async def main() -> int:
@@ -1768,6 +2100,7 @@ async def main() -> int:
         await test_debug_mode(plugin_main)
         await test_long_idle_gap(plugin_main)
         await test_trace_landing(plugin_main)
+        await test_aggregation_integration(plugin_main)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
         FAILED.append("测试脚本本身抛异常")

@@ -4,6 +4,7 @@
 > 覆盖：设计取舍、判定原理、执行架构、七个实机踩坑、数据模型、测试与评测方法、疑难排查案例、未来方向。
 >
 > 插件标识 `astrbot_plugin_topic_router_pro` · 仓库 <https://github.com/xun-hen/astrbot_plugin_topic_router>
+> 当前版本 **v0.9.0**（内建消息聚合，整合自 `astrbot_plugin_msg_aggregator`）
 
 ---
 
@@ -12,7 +13,7 @@
 1. [它是什么、解决什么问题](#1-它是什么解决什么问题)
 2. [设计哲学：三条铁律](#2-设计哲学三条铁律)
 3. [判定原理](#3-判定原理)
-4. [执行架构：两条路](#4-执行架构两条路)
+4. [执行架构：聚合 → 判定 → 兜底](#4-执行架构聚合--判定--兜底v090)
 5. [七个实机踩坑](#5-七个实机踩坑)
 6. [数据模型与持久化](#6-数据模型与持久化)
 7. [配置项设计](#7-配置项设计)
@@ -258,9 +259,38 @@ similarity(a, b): 两个集合的 Jaccard 相似度 = 交集 ÷ 并集
 
 ---
 
-## 4. 执行架构：两条路
+## 4. 执行架构：聚合 → 判定 → 兜底（v0.9.0）
 
-### 4.1 为什么需要两条路
+> **先读这段。** 本章 v0.8.x 的"两条路（事件为主 / 钩子为主）"叙述已在 v0.9.0 被取代。
+> 现在的顺序是：消息入口先做**消息聚合**，聚合完成后的合并文本上判定一次，请求钩子只做
+> **兜底判定 + 请求改写**。下面保留的 v0.8.4 实测记录仍有价值（它解释了为什么不能只靠
+> 消息入口），但结论以本节为准。
+
+### 4.0 v0.9.0 的流水线
+
+```
+消息事件（priority=1000，插件层顶格）
+  └─ handle_message_v090
+       ├─ aggregation.enabled=true
+       │    ├─ 非 Owner 消息：追加到桶、延长等待、stop_event()（不进入下游）
+       │    └─ Owner 消息：await flush → 重构事件（合并文本 + 图片）
+       │         └─ on_settled(合并文本) → _detect 判定一次（DETECTED_ATTR）
+       └─ aggregation.enabled=false
+            └─ 直接 _detect（v0.8.6 语义）
+LLM 请求钩子（hook_llm_request_v090）
+  ├─ 入口没被派发（SEEN_ATTR 缺失）→ 兜底判定 + aggregate.preempted 告警
+  └─ 执行 hint / auto 的请求改写
+```
+
+三条不变量：
+
+1. **一轮只判一次**：合并完成后的 Owner 事件带 `DETECTED_ATTR`，钩子看到就跳过；
+   聚合关闭时入口自己判定，同样打标记；
+2. **非 Owner 不进入下游**：补充消息被 `stop_event()`，用户只收到一次回复；
+3. **失败可见**：入口被更高优先级者挤掉时，钩子仍能判定并写 `aggregate.preempted`，
+   `preempted_total` 计入统计——从"静默不工作"降级为"可见降级"。
+
+### 4.1 为什么保留请求钩子（历史依据）
 
 AstrBot 的消息处理器循环（`core/pipeline/process_stage/method/star_request.py`）：
 
@@ -297,19 +327,24 @@ for handler in activated_handlers:
 > 教训：只读取注册表里的 `priority` 字段值（旧版 §3.3 那种"隔离复现"）**验证不了真实
 > 派发循环里的相对顺序**，必须把真实的 `StarRequestSubStage.process` 跑起来才算数。
 >
-> 因此优先级 60 只保证"比 50 高"，**不保证比所有插件都高**。真实环境若仍有入口零调用，
-> 优先怀疑存在优先级 > 60 的第三方插件。实测表现：`hook_llm_request_v017` 触发 4 次、
+> 因此 v0.8.x 的优先级 60 只保证"比 50 高"，**不保证比所有插件都高**。真实环境若仍有入口
+> 零调用，优先怀疑存在优先级 > 60 的第三方插件。实测表现：`hook_llm_request_v017` 触发 4 次、
 > `handle_message_v017` 触发 **0 次**、`topic_state.json` 始终不存在。
+>
+> **v0.9.0 的处置**：入口优先级提到 **1000**（插件层顶格），聚合因此有更大机会先拿到消息；
+> 但仍不承诺"一定先跑"——请求钩子保留兜底判定，并在入口缺失时写 `aggregate.preempted`。
+> 这才是根因层的做法：先跑是优化，被抢占必须可见。
 
-### 4.2 两条路的分工
+### 4.2 各入口的分工（v0.9.0）
 
-| 路 | 位置 | 优先级 | 角色（v0.8.4） | 能拿到 | 会被挡住吗 |
+| 阶段 | 位置 | 优先级 | 角色 | 能拿到 | 会被挡住吗 |
 | --- | --- | --- | --- | --- | --- |
-| 消息事件 | `handle_message_v017` | 60 | **可选快通道** | 完整事件对象 | **会**（实机实测：一次都没执行）|
-| 请求钩子 | `hook_llm_request_v017` | 60 | **判定主战场** | 事件对象 **+** `ProviderRequest` | **不会**（不在循环里）|
+| 聚合 | `handle_message_v090` | 1000 | **第一阶段** | 完整事件对象 | 可能（`sys.maxsize` 内置 handler 或更高优先级插件）|
+| 判定 | 聚合后的 `on_settled` | — | **主路径** | 合并文本 + 事件 | 否（由聚合触发）|
+| 兜底 | `hook_llm_request_v090` | 1000 | **被抢占时仍判定** + 请求改写 | 事件对象 + `ProviderRequest` | **不会**（不在循环里）|
 
-**主次在 v0.8.4 反转了**：以前是"事件路为主、钩子兜底"，现在是"**钩子为准、事件路可选**"。
-理由是实测——事件路可能一条都不执行，而钩子路 41 次触发、7 次判定全部正常。
+**v0.9.0 的主次**：聚合阶段负责"看到消息、合并、重构"，钩子负责"入口没跑时补判 +
+改写请求"。两者靠 `SEEN_ATTR` / `DETECTED_ATTR` 两个事件标记互斥，而不是靠文本去重。
 
 还有一个长期存在的**错误前提**在 v0.8.4 被纠正：钩子**能拿到事件对象**。
 `call_event_hook` 是 `await handler.handler(event, *args)`，实机为
@@ -326,15 +361,16 @@ tail = prompt.rsplit(marker, 1)[-1] if marker in prompt else ""
 这条路**依赖判定器自己拼的提示词格式**：只要有插件改写了 `prompt`（比如注入自己的
 系统提示），标记就切不准。所以它只作最后手段，抠不出来就安静跳过，不硬猜。
 
-### 4.3 去重：两条路如何互不打架
+### 4.3 去重：标记优先，文本键兜底
 
-两条路都可能先到、也可能都到，所以需要去重。
+v0.9.0 的第一层是**事件标记**：入口执行过 → `SEEN_ATTR`；判定尝试过 → `DETECTED_ATTR`。
+钩子只在两者缺失时兜底，正常情况下根本不会走到判定逻辑。
 
-**v0.8.4 起两路共用同一把锁**（因为钩子也能拿到事件对象，算得出同样的权威键）：
+第二层是原有的消息身份去重（**只用于兜底路**）：
 
 | 情况 | 去重键 | 存在哪 | 为什么 |
 | --- | --- | --- | --- |
-| **有事件对象**（任一入口，v0.8.4 的常态）| `消息ID\|时间戳` | `state.last_detected`（持久化）| 用户**重发同一句话**是新的消息 ID，必须算新一轮 |
+| **有事件对象** | `消息ID\|时间戳` | `state.last_detected`（持久化）| 用户**重发同一句话**是新的消息 ID，必须算新一轮 |
 | 没有事件（老框架的钩子）| 文本归一化后前 120 字 | `RUNTIME.last_detect`（内存，10 秒窗）| 拿不到消息 ID，只能按文本猜；窗口短是为了不吞掉重发 |
 
 钩子路还会把指纹落到 `TopicState.last_detected_hook`（**持久化**，v0.8.2 新增），
@@ -352,25 +388,33 @@ tail = prompt.rsplit(marker, 1)[-1] if marker in prompt else ""
 
 | handler | 类型 | 优先级 | 职责 |
 | --- | --- | --- | --- |
-| `handle_message_v017` | `event_message_type(ALL)` | 60 | 判定主入口（路 A） |
-| `hook_llm_request_v017` | `on_llm_request` | 60 | 判定备入口（路 B）+ `hint`/`auto` 请求改写 |
-| `hook_llm_response_v018` | `on_llm_response` | 0 | 记录机器人回复，供下一次判定使用 |
-| `command_topic_v017` | `command("topicweave")` | 60 | `/topicweave` 指令族 |
-| `on_loaded_v017` | `on_astrbot_loaded` | 0 | 启动诊断（可用模型 ID、配置校验） |
+| `handle_message_v090` | `event_message_type(ALL)` | 1000 | **聚合 + 判定**（聚合关闭时退化为逐条判定） |
+| `hook_llm_request_v090` | `on_llm_request` | 1000 | **兜底判定**（入口被抢占时）+ `hint`/`auto` 请求改写 |
+| `hook_llm_response_v090` | `on_llm_response` | 0 | 记录机器人回复，供下一次判定使用 |
+| `command_topic_v090` | `command("topicweave")` | 1000 | `/topicweave` 指令族 |
+| `on_loaded_v090` | `on_astrbot_loaded` | 0 | 启动诊断（可用模型 ID、配置校验、聚合状态） |
 
 **handler 全部是模块级函数**，不声明 `self`。原因见 [5.3](#53-handler-拿不到-self)。
 
-### 4.5 模块布局
+### 4.5 模块布局（v0.9.0）
 
 | 文件 | 行数 | 职责 |
 | --- | --- | --- |
-| `router.py` | ~1150 | handler、判定流程编排、指令、请求改写、诊断 |
+| `router.py` | ~1800 | handler、聚合/判定流程编排、指令、请求改写、诊断、抢占检测 |
+| `aggregation/service.py` | ~600 | 聚合业务编排：缓冲、结算、附件、通知事件、统计回调 |
+| `aggregation/config.py` | ~355 | 聚合配置模型 + 三档预设 + 校验（与 schema 逐项对齐） |
+| `aggregation/session.py` | ~430 | 桶/轮次/快照状态机（同步转移，无 IO） |
+| `aggregation/event_io.py` | ~403 | 事件解析与重构的唯一一层 |
+| `aggregation/{timer,strategy}.py` | ~300 | 防抖计时器与自适应等待（纯函数/可注入时钟） |
+| `aggregation/{attachments,capabilities}.py` | ~500 | 图片保活、平台能力探测 |
+| `aggregation/{stats,observability,web_api}.py` | ~1200 | 统计、只读投影、页面后端 |
+| `pages/status/` | — | 零依赖插件详情页（读聚合统计） |
 | `detection.py` | ~451 | 启发式打分、提示词构造、结果解析与合并（**纯函数，易测**） |
 | `state.py` | ~202 | 话题状态与持久化 |
 | `main.py` / `__init__.py` | 9 | 入口，只做转出 |
-| `_conf_schema.json` | — | WebUI 配置定义 |
+| `_conf_schema.json` | — | WebUI 配置定义（含 `aggregation` 对象分组） |
 | `metadata.yaml` | — | 插件元信息 |
-| `build_zip.py` | ~188 | 打包器（含三道自检） |
+| `build_zip.py` | ~280 | 打包器（自动发现 .py + 递归 aggregation/pages + 三道自检） |
 
 **分层的用意**：所有判定逻辑都在 `detection.py` 的纯函数里（输入消息 + 状态，输出结论），
 不和 AstrBot 的运行时耦合。所以能离线跑、能灌真实数据评测、能在任何 Python 3.10+ 上验证。
@@ -381,7 +425,11 @@ tail = prompt.rsplit(marker, 1)[-1] if marker in prompt else ""
 
 这一节是本文档最有价值的部分：每一条都是**线上事故换来的**，症状都有迷惑性。
 
-### 5.1 消息入口零执行【严重，v0.8.4 定案】
+### 5.1 消息入口零执行【严重，v0.8.4 定案；v0.9.0 已缓解】
+
+> **v0.9.0 状态**：入口优先级提到 1000，并保留请求钩子兜底 + 抢占告警。下面的分析仍然
+> 成立（入口可能被任何更高优先级者挡掉），但"零执行"不再等于"零判定"——钩子会补判，
+> `aggregate.preempted` 会留下证据。阅读时把"60"理解为"当时的优先级"。
 
 **症状**：插件显示已加载、配置正确、日志里有活动记录，但聊天中**完全没有任何判定**：
 没有日志、没有状态文件、没有提示，像没装一样。**群聊正常，私聊必现。**
@@ -516,6 +564,10 @@ def _extract(*args, **kwargs) -> tuple[Any, Any]:
 
 ### 5.8 内置 handler 用 `sys.maxsize` 抢优先级——抬数字永远追不上
 
+> **v0.9.0 状态**：本插件已取插件层顶格 1000，仍低于 `sys.maxsize`；但判定不再依赖入口，
+> 钩子兜底 + `aggregate.preempted` 让"被内置 handler 抢掉"可见。§25 的结论不变：
+> 调大数字只能降低概率，不能证明已解决。
+
 **症状**：与本插件 §5.1 相同（入口零执行），且"把 priority 从 50 抬到 60"毫无效果。
 
 **根因**：框架内置 Star 在 `AdapterMessageEvent` 上注册了**极高优先级**的 handler
@@ -564,6 +616,8 @@ def _extract(*args, **kwargs) -> tuple[Any, Any]:
 ### 6.2 持久化策略
 
 `TopicStore` 写 `<数据目录>/plugin_data/astrbot_plugin_topic_router_pro/topic_state.json`。
+聚合相关文件同目录：`stats.json`（累计统计，原子替换）、`attachments/`（图片缓存，TTL 清理）、
+`trace.log`（排障落盘，单文件 512KB 轮转）。
 
 两个设计点：
 
@@ -599,9 +653,14 @@ def _extract(*args, **kwargs) -> tuple[Any, Any]:
 | `short_message_length` | 25 | 想省模型调用 → 调小（0 = 恢复旧行为，不推荐） |
 | `history_turns` | 3 | 判定不准且上下文长 → 调大 |
 | `include_assistant_reply` | true | 想省 token 可关（不建议） |
-| `detect_in_hook` | true | **别关**，见 [5.1](#51-消息入口被别的插件静默严重) |
+| `detect_in_hook` | true | **别关**，是入口被抢占时的唯一兜底（v0.9.0 起正常路径已在聚合阶段判定）|
 | `timeout_seconds` | 8 | 模型慢 → 调大 |
 | `max_checks_per_hour` | 30 | 话痨群控成本 |
+| `aggregation.enabled` | true | 不想要合并等待 → 关；行为退回 v0.8.6 |
+| `aggregation.preset` | `balanced` | 延迟敏感 → `fast`；长段落/慢打字 → `patient` |
+| `aggregation.adaptive_max_total_wait` | 12 | 用户一直发导致迟迟不结算 → 调小 |
+| `aggregation.group_enabled` | true | 群聊不想拦截 → 关（注意未唤醒消息本来也看不到） |
+| `aggregation.page_enabled` | true | 公开部署想减少攻击面 → 关（不注册页面后端） |
 | `new_conversation_notice` | **false** | `auto` 切换时是否提示一句。默认关闭：判定质量未标定前不该默认打扰用户（v0.8.5 改） |
 | `debug_log` | true | 把判定明细写进 `info.log` |
 | `debug_mode` | false | **调试模式（空跑 + 详细日志）**，见 [7.1](#71-调试模式空跑) |
@@ -661,10 +720,10 @@ def _extract(*args, **kwargs) -> tuple[Any, Any]:
 `StarRequestSubStage.process` + 真实的 `star_handlers_registry` 跑：
 
 1. 注册表里各 handler 的 `priority` / `event_type` / `event_filters`；
-2. 真实派发顺序（证明 priority 60 排在 50 之前）；
+2. 真实派发顺序（证明 priority 1000 排在 50 之前）；
 3. 事件被静默后循环 break、入口拿不到机会；
 4. **同一事件下 `on_llm_request` 照常触发** —— 复现"只有钩子日志、没有入口日志"的形态；
-5. 反向验证：**priority 70 才能挡住入口**（60 不是万能）；
+5. 反向验证：**priority 1100 才能挡住入口**（1000 不是万能）；
 6. `plugin.activated` 过滤路径（另一条被忽略的静默成因）。
 
 ### 8.1 真实数据评测台
@@ -808,7 +867,7 @@ python build_zip.py     # 输出到插件工作区的 dist/ 目录
 | 2 | **英文支持** | 词表全是中文，字符 2-gram 对英文判别力弱 → 英文场景几乎每轮都要问模型 |
 | 3 | 话题名随时间刷新 | 目前 `CONTINUE` 时只在模型返回了名字才更新，长话题的名字会停在第 1 轮 |
 | 4 | 并行判定 | `_ask_llm` 在链路里 `await`，占几百毫秒；判定结果影响的是下一轮上下文，可以并行 |
-| 5 | 运行统计 | `cost_ms` 只有单次记录；加"模型调用次数/启发式命中率/判新话题率"计数器与自省指令 |
+| 5 | 运行统计 | **已实现（v0.9.0）**：聚合统计 + 只读投影 + 插件详情页；判定侧 `cost_ms` 仍只有单次记录 |
 | 6 | 状态存储升级 | 目前全量重写 JSON；会话数上百时该换 SQLite 或宿主 KV |
 | 7 | 暴露内部置信度 | `combine()` 里的 0.8 等阈值目前硬编码 |
 | 8 | 国际化 | 配置项描述全中文，非中文用户在市场里看不懂 |
@@ -820,7 +879,9 @@ python build_zip.py     # 输出到插件工作区的 dist/ 目录
 
 | 常量 | 值 | 位置 | 含义 |
 | --- | --- | --- | --- |
-| `MESSAGE_PRIORITY` | 60 | `router.py` | 消息入口与命令的优先级 |
+| `MESSAGE_PRIORITY` | 1000 | `router.py` / `aggregation/service.py` | 消息入口、命令与聚合的优先级（插件层顶格） |
+| `SEEN_ATTR` | `_topic_router_seen_v090` | `router.py` | 事件上的"入口执行过"标记 |
+| `DETECTED_ATTR` | `_topic_router_detected_v090` | `router.py` | 事件上的"判定已尝试"标记（防钩子重复判定） |
 | `DETECT_DEDUP_WINDOW` | 90.0 | `router.py` | 去重表清理窗口 |
 | `HOOK_DEDUP_WINDOW` | 10.0 | `router.py` | 钩子跳过事件路已判文本的窗口 |
 | `RECENT_KEEP` | 6 | `router.py` | 保留的近期用户消息条数 |

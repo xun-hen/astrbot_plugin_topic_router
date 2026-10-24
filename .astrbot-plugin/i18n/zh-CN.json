@@ -1,0 +1,27 @@
+{
+  "metadata": {
+    "display_name": "话题路由器PRO"
+  },
+  "views": {
+    "status": {
+      "title": "聚合运行状态",
+      "description": "查看消息聚合的运行态、合并率、耗时分布与最近处理记录。面板只读，仅支持切换预设与清空统计。",
+      "heading": "聚合运行状态",
+      "live_on": "实时",
+      "live_polling": "轮询中（实时推送不可用）",
+      "live_error": "实时中断，改用轮询",
+      "no_bridge": "当前 Dashboard 不支持插件视图（缺少 bridge），请升级 AstrBot。"
+    }
+  },
+  "pages": {
+    "status": {
+      "title": "聚合运行状态",
+      "description": "查看消息聚合的运行态、合并率、耗时分布与最近处理记录。面板只读，仅支持切换预设与清空统计。",
+      "heading": "聚合运行状态",
+      "live_on": "实时",
+      "live_polling": "轮询中（实时推送不可用）",
+      "live_error": "实时中断，改用轮询",
+      "no_bridge": "当前 Dashboard 不支持插件视图（缺少 bridge），请升级 AstrBot。"
+    }
+  }
+}

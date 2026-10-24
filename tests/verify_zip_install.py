@@ -438,10 +438,27 @@ def main() -> int:
                     any(n == f"{PACKAGE_NAME}/" for n in names),
                     str(names),
                 )
+                nested = [n for n in names if n.count(FS) > 1]
+                allowed = all(
+                    n.startswith(f"{PACKAGE_NAME}/aggregation/")
+                    or n.startswith(f"{PACKAGE_NAME}/pages/")
+                    or n.startswith(f"{PACKAGE_NAME}/.astrbot-plugin/")
+                    for n in nested
+                )
                 check(
-                    "无嵌套子目录",
-                    all(n.count(FS) <= 1 for n in names),
-                    str([n for n in names if n.count(FS) > 1]),
+                    "嵌套子目录只有 aggregation/、pages/ 与 .astrbot-plugin/",
+                    allowed,
+                    str(nested),
+                )
+                check(
+                    "内建聚合模块已进包",
+                    any(n.endswith("/aggregation/service.py") for n in names),
+                    str(nested),
+                )
+                check(
+                    "插件详情页已进包",
+                    any(n.endswith("/pages/status/index.html") for n in names),
+                    str(nested),
                 )
                 check("无 __pycache__", all("__pycache__" not in n for n in names))
                 check(

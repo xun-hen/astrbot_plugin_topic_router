@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>聚合运行状态 · 话题路由器 PRO</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="bar-title">
+        <span class="dot" id="dot"></span>
+        <strong id="title">聚合运行状态</strong>
+        <span class="muted" id="live-state">连接中…</span>
+      </div>
+      <div class="bar-actions">
+        <label class="muted" for="preset">等待策略</label>
+        <select id="preset" aria-label="等待策略"></select>
+        <button id="reset" class="ghost" type="button">清空统计</button>
+        <button id="refresh" class="ghost" type="button">刷新</button>
+      </div>
+    </header>
+
+    <p id="fatal" class="fatal" hidden></p>
+
+    <section class="cards" id="cards">
+      <div class="card">
+        <span class="card-label">合并率</span>
+        <strong class="card-value" id="c-merge">–</strong>
+        <span class="card-hint">每条下游调用承载几条用户消息</span>
+      </div>
+      <div class="card">
+        <span class="card-label">已结算</span>
+        <strong class="card-value" id="c-flush">–</strong>
+        <span class="card-hint" id="c-flush-hint">正常完成</span>
+      </div>
+      <div class="card">
+        <span class="card-label">已放弃</span>
+        <strong class="card-value" id="c-abort">–</strong>
+        <span class="card-hint">中断/关停等</span>
+      </div>
+      <div class="card">
+        <span class="card-label">活跃轮次</span>
+        <strong class="card-value" id="c-active">–</strong>
+        <span class="card-hint">正在缓冲或结算</span>
+      </div>
+    </section>
+
+    <p id="preempted" class="notice" hidden></p>
+
+    <div class="grid-2">
+      <section class="panel">
+        <h2>渠道分布</h2>
+        <div id="channels" class="bars"></div>
+      </section>
+      <section class="panel">
+        <h2>丢弃原因</h2>
+        <div id="drops" class="bars"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <h2>结算耗时分布 <span class="muted">（桶近似，非精确分位）</span></h2>
+      <div class="latency">
+        <svg id="hist" viewBox="0 0 640 140" preserveAspectRatio="none" role="img"
+             aria-label="结算耗时直方图"></svg>
+        <div class="latency-meta">
+          <span>P50 ≈ <b id="p50">–</b> ms</span>
+          <span>P95 ≈ <b id="p95">–</b> ms</span>
+          <span>样本 <b id="lsample">–</b></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>活跃轮次 <span class="muted" id="rounds-count"></span></h2>
+      <div class="table-wrap">
+        <table id="rounds">
+          <thead>
+            <tr>
+              <th>会话</th><th>发送者</th><th>轮次</th><th>状态</th>
+              <th>条数</th><th>剩余等待</th><th>输入中</th><th>冷却</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="empty" id="rounds-empty">当前没有进行中的聚合</p>
+    </section>
+
+    <section class="panel">
+      <h2>最近处理 <span class="muted">（只含计数与耗时，不含消息内容）</span></h2>
+      <div class="table-wrap">
+        <table id="history">
+          <thead>
+            <tr>
+              <th>时间</th><th>会话</th><th>条数</th><th>图片</th><th>耗时</th><th>结果</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="empty" id="history-empty">暂无记录</p>
+    </section>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

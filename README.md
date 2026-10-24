@@ -2,13 +2,15 @@
 
 # 话题路由器 PRO · Topic Router
 
-> 让机器人自己判断用户这句话是**接着上一个话题**，还是**开了新话题**。
+> 先合并连发消息，再判断用户这句话是**接着上一个话题**，还是**开了新话题**。
 
 AstrBot 的对话是一整条上下文。当用户在同一个会话里从"帮我画个电路板"跳到"顺便看看 NAS 硬盘"
 时，模型会把两件事混在一起回答；等到上下文攒到 50 条被压缩，话题边界就彻底糊了。
+而用户把一句话拆成三条发时，逐条判定又会把同一件事判成三次。
 
-这个插件在每条用户消息到达时做一次轻量判定，输出「延续 / 新话题」+ 置信度，然后按你选的
-模式行动。**默认只记录，不改任何上下文**——先看几天它判得准不准，再决定要不要自动翻篇。
+v0.9.0 起，插件把「消息聚合」内建为判定的第一阶段：先按自适应防抖把连续消息缓冲成一轮，
+再在合并后的文本上做一次轻量判定，输出「延续 / 新话题」+ 置信度，然后按你选的模式行动。
+**默认只记录，不改任何上下文**——先看几天它判得准不准，再决定要不要自动翻篇。
 
 ```
 [话题路由器] NEW-TOPIC | webchat:... | confidence=0.90 | source=llm | topic=硬盘扩容 | ...
@@ -17,11 +19,12 @@ AstrBot 的对话是一整条上下文。当用户在同一个会话里从"帮�
 
 | | |
 | --- | --- |
-| 适用 | AstrBot ≥ 4.24（v4.x） |
+| 适用 | AstrBot ≥ 4.26（v4.x） |
 | 依赖 | **零第三方依赖**（纯标准库） |
 | 许可 | MIT |
 | 模式 | `off` / `mark`（默认）/ `hint` / `auto` |
 | 指令 | `/topicweave`（别名 `话题织机`） |
+| 聚合 | 内建、默认开启；`aggregation.enabled=false` 可退回逐条判定 |
 
 ---
 
@@ -52,26 +55,25 @@ AstrBot 的对话是一整条上下文。当用户在同一个会话里从"帮�
 3. **失败不影响正常聊天**。判定是旁路：超时、异常、JSON 解析失败都退化成「延续」，
    该回的消息照常回。
 
-**判定跑在两条路上，主战场是请求钩子**：
+**v0.9.0 的流水线：先聚合，再判定**：
 
-| 路 | 位置 | 角色 | 特点 |
+| 阶段 | 位置 | 角色 | 说明 |
 | --- | --- | --- | --- |
-| 消息事件 | `handle_message_v017`，`priority=60` | 可选**快通道** | 最快、最早拿到事件；但**实测可能一次都不执行** |
-| 请求钩子 | `hook_llm_request_v017` | **判定主战场** | 不在插件排队循环里，**不会被任何优先级挡住**；也能拿到事件对象 |
+| ① 聚合 | `handle_message_v090`，`priority=1000` | **第一阶段** | 缓冲连续消息、自适应等待、重构事件；非 Owner 消息被静默 |
+| ② 判定 | 聚合完成后的 `on_settled(合并文本)` | **主路径** | 在**合并后**的文本上判一次，`turns` 只推进一轮 |
+| ③ 兜底 | `hook_llm_request_v090` | **被抢占时仍判定** | 不在插件排队循环里，任何优先级都挡不住；同时执行 `hint`/`auto` 改写 |
 
 AstrBot 的处理器循环遇到 `event.is_stopped()` 就会 `break`。只要有**优先级高于本插件**的
-执行者先跑并静默事件，消息入口就一次都执行不到。两条路靠去重互斥，同一条消息只判定一次。
+执行者先跑并静默事件，消息入口就一次都执行不到。所以：
 
-> ⚠️ **v0.8.4 实测定案**：本插件的消息入口在真机上**确实一次都没进入函数体**
-> （落盘探针 `trace.log`：`ENTRY` = 0 行，`VERDICT` 7 行且**全部 `via=hook`**）。
-> 排除掉第三方插件（最高才 `priority=50`）后，唯一能挡住入口的是**框架内置**的
-> `handle_session_control_agent`——它挂在 `sys.maxsize`（`builtin_stars/astrbot/main.py:44`），
-> **抬到 60 永远追不上**。所以判定主战场已迁到请求钩子，入口只作可选快通道。
+- 优先级取插件层顶格 **1000**，尽最大可能先拿到消息（聚合必须如此）；
+- 但仍**不把"先跑"当保证**：请求钩子会检查入口标记，没跑就兜底判定，并落
+  `aggregate.preempted` 告警与 `preempted_total` 计数——失败从静默变成可见。
+
+> ⚠️ 历史结论（v0.8.4）：升级前消息入口在真机上一次都没进入函数体
+> （`ENTRY`=0、`VERDICT` 全部 `via=hook`）。当时入口优先级是 60，低于框架内置的
+> `handle_session_control_agent`（`sys.maxsize`）。v0.9.0 把入口抬到 1000 并保留钩子兜底；
 > 证据链见 [docs/evidence-entry-never-runs.md](https://github.com/xun-hen/astrbot_plugin_topic_router/blob/main/docs/evidence-entry-never-runs.md)。
-
-> ⚠️ v0.8.2 更正：旧版这里说「消息防抖动插件（`priority=50`）会挡住我们」是**误判**——
-> `tests/reproduce_priority_race.py` 在真实注册表上验证过，它排在 `priority=60` 的本插件
-> **之后**。优先级是相对值，永远不提供绝对保证，所以判定以请求钩子为准（那条路不在循环里）。
 
 判定结果按会话（UMO）隔离保存，`auto` 模式只是替用户执行了一次 `/new`，旧对话完整留档。
 
@@ -81,6 +83,7 @@ AstrBot 的处理器循环遇到 `event.is_stopped()` 就会 `break`。只要有
 
 - [原理](#原理)
 - [它能做什么](#它能做什么)
+- [消息聚合（内建）](#消息聚合内建)
 - [安装：先选你的部署方式](#安装先选你的部署方式)
 - [从旧版升级（原「话题路由器」）](#从旧版升级原话题路由器)
   - [方式 A：WebUI 上传（所有平台通用，推荐）](#方式-a从插件市场安装最简单推荐)
@@ -131,6 +134,46 @@ AstrBot 的处理器循环遇到 `event.is_stopped()` 就会 `break`。只要有
 
 ---
 
+## 消息聚合（内建）
+
+v0.9.0 把独立插件 [`astrbot_plugin_msg_aggregator`](https://github.com/xun-hen/astrbot_plugin_msg_aggregator)
+的核心整体迁入本插件（`aggregation/` 目录），**默认开启**。
+
+**它解决什么**：
+
+```
+你: 帮我看看 NAS 硬盘        ┐
+你: 好像有点响               ├─ 合并成一轮 → 只回一次，判定只推进 1 轮
+你: 是不是要换一个           ┘
+```
+
+不开聚合时，上面三句话会触发三次判定、三次 LLM 调用；开了之后只触发一次。
+
+**默认行为**：
+
+| 项 | 默认 | 说明 |
+| --- | --- | --- |
+| 等待策略 | `balanced` | 2.0 秒自适应防抖；`fast`=1.0s 固定，`patient`=3.5s 自适应 |
+| 总等待上限 | 12 秒 | 从第一条算起，防止用户一直发导致永不结算 |
+| 群聊合并 | 开 | 按「会话 + 发送者」分桶，同群不同人不会互相合并 |
+| 输入状态感知 | 开 | 支持平台（如 NapCat `input_status`）上，用户打字时暂停计时 |
+| 撤回过滤 | 开 | 等待期内撤回的消息不进入合并结果（仅支持撤回通知的平台） |
+| 图片保活 | 开 | 本地临时图片复制到插件缓存，避免第 2+ 条消息的图丢失 |
+| 统计与页面 | 开 | 插件详情页可看合并率、延迟、最近轮次；数据落 `plugin_data/.../stats.json` |
+
+**群聊的可达性限制（平台级，必须知道）**：未被唤醒的群消息在 AstrBot 的唤醒阶段就被
+拦截，插件根本看不到。因此群聊合并只在**每条补充消息都 @ 机器人（或带唤醒前缀）**时生效。
+私聊不受此限制。
+
+**想关掉聚合**：把 `aggregation.enabled` 设为 `false`。行为回到 v0.8.6——每条消息即时判定、
+没有额外等待。其它聚合参数（防抖、预设、群聊、附件配额、统计）都在 `aggregation` 分组下。
+
+**被抢占时会怎样**：入口优先级已取插件层顶格 1000，但仍可能被 `sys.maxsize` 的内置会话
+控制或别的 1000 插件挤掉。此时请求钩子仍会判定，并写 `aggregate.preempted` 警告、把
+`preempted_total` 计入统计——不会静默失效。
+
+---
+
 ## 安装：先选你的部署方式
 
 不管你用哪种方式跑 AstrBot，插件最终都装在同一个地方：
@@ -154,6 +197,13 @@ AstrBot 的处理器循环遇到 `event.is_stopped()` 就会 `break`。只要有
 
 **装完生效方式**：市场安装和 WebUI 上传都会**自动加载**，一般不需要重启；但升级已装的版本时，
 建议**重启一次 AstrBot 进程**（原因见 [排错](#排错)：热重载不会清掉内存里的旧注册项）。
+
+> ⚠️ **从 v0.8.x 升级到 v0.9.0**：消息聚合**默认开启**，所以升级后你会先感觉到约 2 秒的
+> 合并等待。这是预期行为；不想要就在插件配置的 `aggregation.enabled` 关掉。旧配置项
+> 原地保留，不需要迁移。
+>
+> ⚠️ **如果你同时装了独立版「消息聚合」（`astrbot_plugin_msg_aggregator`），请先卸载它**：
+> 两者都用 priority 1000 缓冲消息，同时启用会互相抢事件。本插件已经内建同样的能力。
 
 ---
 
@@ -478,7 +528,7 @@ export ASTRBOT_ROOT=/opt/astrbot      # 之后数据都在 /opt/astrbot/data
 发一句话给机器人，然后在 AstrBot 日志里找这两行：
 
 ```
-[话题路由器] handle_message_v017 被调用 | vX.Y.Z | umo=... | msg='你好' | stopped=False
+[话题路由器] handle_message_v090 被调用 | vX.Y.Z | umo=... | msg='你好' | stopped=False | 聚合=开
 [话题路由器] NEW-TOPIC | webchat:... | confidence=0.90 | source=llm | topic=... | ...
 ```
 
@@ -492,7 +542,7 @@ export ASTRBOT_ROOT=/opt/astrbot      # 之后数据都在 /opt/astrbot/data
 
 | 条件 | 说明 |
 | --- | --- |
-| AstrBot ≥ 4.24 | 只用到 `TextPart.mark_as_temp`（4.24+），且**仅 `hint` 模式**需要；`mark` 模式不受版本影响 |
+| AstrBot ≥ 4.26 | 聚合阶段以 4.26 为基线（`input_status` 探测、附件 `untrack` 降级路径）；`hint` 模式另需 `TextPart.mark_as_temp`（4.24+） |
 | **内置 Agent Runner** | `provider_settings.agent_runner_type` 必须是 `local`。切到 Dify / Coze / DashScope / DeerFlow 时钩子不触发，插件静默不工作 |
 | 一个可用的 LLM Provider | 判定要一次模型调用（可指定便宜模型）。不配也能跑，退化成纯启发式 |
 | 平台无关 | QQ / 微信 / Telegram / Discord / WebChat 等所有平台都适用，只要消息能到达 LLM |
@@ -531,8 +581,28 @@ export ASTRBOT_ROOT=/opt/astrbot      # 之后数据都在 /opt/astrbot/data
 | `debug_mode` | `false` | **调试模式：只看不做 + 详细日志**。开启后不切对话、不注入提示，只在日志与 `trace.log` 写「本想做什么」 |
 | `trace_enabled` | `false` | 把入口调用证据落盘到 `trace.log`（排障用，见故障排查表） |
 
+**聚合分组（`aggregation.*`，默认开启）**：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `aggregation.enabled` | `true` | 聚合总开关；关闭后逐条判定 |
+| `aggregation.preset` | `balanced` | `fast` / `balanced` / `patient` |
+| `aggregation.debounce_time` | `2.0` | 最后一条消息后等多久结算 |
+| `aggregation.adaptive` | `true` | 按长度、结尾标点、连续短句动态延长等待 |
+| `aggregation.adaptive_max_wait` | `6.0` | 单次等待上限 |
+| `aggregation.adaptive_max_total_wait` | `12.0` | 一轮总等待上限 |
+| `aggregation.group_enabled` | `true` | 群聊是否参与合并（按「会话+发送者」分桶） |
+| `aggregation.typing_detection` | `true` | 输入状态感知（平台支持时生效） |
+| `aggregation.recall_filter` | `true` | 过滤等待期内撤回的消息 |
+| `aggregation.preserve_part_order` | `false` | 保留图文交错顺序（实验性） |
+| `aggregation.page_enabled` | `true` | 是否注册插件详情页后端 |
+
+完整字段（图片配额、指令中断、统计落盘、页面推送间隔等）见 `_conf_schema.json` 里的
+`aggregation` 分组；默认值在代码里只写一次，并由测试断言与 schema 逐项一致。
+
 状态文件：`<数据目录>/plugin_data/astrbot_plugin_topic_router_pro/topic_state.json`
 （每个会话一条记录，直接删文件等于全部重置）。
+聚合统计与附件缓存：同目录下的 `stats.json` 与 `attachments/`。
 
 ---
 
@@ -559,8 +629,11 @@ export ASTRBOT_ROOT=/opt/astrbot      # 之后数据都在 /opt/astrbot/data
 | --- | --- |
 | 安装时报 `FileNotFoundError: .../plugin/astrbot_plugin_topic_router_pro` | 包是用系统压缩工具打的（反斜杠条目名 / 缺目录条目）。用 `python build_zip.py` 重新打包，或直接用 release 里的包 |
 | 日志里完全没有插件的行 | 插件没装上或被禁用：去 **插件 → 插件** 看列表状态与版本 |
-| 有 `hook_llm_request_v017 被调用`，但搜不到 `handle_message_v017 被调用`，且没有 `topic_state.json` | v0.7.x 的已知缺陷（消息入口被静默）。升级到 **v0.8.0+** 即可，判定已迁移到请求钩子 |
-| 升级到 v0.8.0+ 后仍只有钩子日志、没有入口日志 | **v0.8.4 已定案为正常现象**：入口在真机上可能一次都不执行（实测 `trace.log` 里 `ENTRY`=0、`VERDICT` 全部 `via=hook`），判定由请求钩子承担，功能不受影响。要确认请开 `trace_enabled` 看 `trace.log`：<br>· **有 ENTRY** → 入口在跑；<br>· **无 ENTRY、有 HOOK/VERDICT** → 入口被上游静默（预期行为，无需处理）。<br>注意：**别用 `grep -c` 数日志**——WebUI 会把你自己敲的命令也记进 `info.log`，统计会把自己数进去 |
+| 有 `hook_llm_request_v090 被调用`，但搜不到 `handle_message_v090 被调用` | 消息入口被上游静默了。v0.9.0 起钩子会**兜底判定**并写 `aggregate.preempted`；开 `trace_enabled` 看 `trace.log`，有 `PREEMPTED` 行就是被抢占的证据。功能不受影响，只是这一条没有经过聚合 |
+| 连发几条消息却没被合并 | 确认 `aggregation.enabled` 为 `true`；看日志 `aggregate.start` / `aggregate.flush`。群聊里只有每条都 @ 机器人（或带唤醒前缀）的消息才可能合并——未唤醒消息在唤醒阶段就被拦掉了 |
+| 机器人迟迟不回复 | 聚合在等最后一条消息：检查 `aggregation.adaptive_max_total_wait` 是否被调得极大；用户一直处于"正在输入"时由 `max_typing_wait`（默认 60s）兜底 |
+| 图片丢了 | 看日志 `attach.persist_failed`：临时文件复制失败且平台不支持 `untrack` 时会退化为 base64；仍失败则只丢该图、文本保留 |
+| 合并率/统计看起来不对 | 面板里的耗时是**桶近似**（不是精确分位）；合并率 = 结算总条数 / 结算轮次。跨重启累计值在 `stats.json`，可在页面点"清空统计" |
 | 有 `模块已导入` 但没有判定日志 | `mode` 是 `off`、或 `enabled` 是 `false`、或 `debug_log` 关了；也可能是这个会话被 `/topicweave off` 关了 |
 | 判定结果和实际不符，老是判延续 | 看日志里的 `heuristic_confidence`：启发式就判了延续的话，调低 `sim_continue` 或调高 `sim_new_topic` |
 | `[WARN] 判定模型调用失败` | `provider_id` 写错或该 provider 不可用；去日志里抄一个可用的 ID |
@@ -603,7 +676,7 @@ python tests/eval_topic_detection.py --json-out before.json
 五套离线测试，都不需要启动 AstrBot（第一、四、五套需要 AstrBot 的 Python 环境来 import 真实代码）：
 
 ```bash
-# 1) 插件逻辑：178 项（含跨路去重、钩子两种形态、调试模式、长空闲、落盘取证；需要 AstrBot 的 python）
+# 1) 插件逻辑：206 项（含跨路去重、钩子两种形态、调试模式、长空闲、落盘取证、聚合整合；需要 AstrBot 的 python）
 python tests/run_tests.py
 
 # 2) 可移植性：16 项（用桩模块，任意 Python 3.10+）
@@ -637,10 +710,12 @@ Linux 上的 AstrBot 解包后会抛 `FileNotFoundError`；此外它还会把 `t
 | 文件 | 作用 |
 | --- | --- |
 | `main.py` / `__init__.py` | 插件入口，只做转出 |
-| `router.py` | handler（模块级）+ 判定流程编排 + 指令 |
+| `router.py` | handler（模块级）+ 聚合/判定流程编排 + 指令 |
 | `detection.py` | 启发式打分、模型提示词、结果解析与合并（纯函数，易测） |
 | `state.py` | 话题状态持久化（按会话分条） |
-| `_conf_schema.json` | WebUI 配置项定义 |
+| `aggregation/` | 内建消息聚合：配置、状态机、计时器、事件重构、附件保活、统计、页面后端 |
+| `pages/status/` | 插件详情页（零依赖前端，读聚合统计） |
+| `_conf_schema.json` | WebUI 配置项定义（含 `aggregation` 分组） |
 | `metadata.yaml` | 插件元信息 |
 | `tests/eval_topic_detection.py` | 真实数据评测台（阈值调参用，不进安装包） |
 | `docs/DESIGN.md` | **技术文档（源）**：设计取舍、判定原理、执行架构、七个实机踩坑、测试体系 |

@@ -60,8 +60,8 @@ Linux 上的 AstrBot 解包后会抛 `FileNotFoundError`；它还会把 `tests/`
 
 ### 1. handler 必须是模块级函数，不能是类方法
 
-`router.py` 里的 `handle_message_v017` / `hook_llm_request_v017` / `hook_llm_response_v018` /
-`command_topic_v017` / `on_loaded_v017` 全是**模块级函数**，签名是 `(*args, **kwargs)`，
+`router.py` 里的 `handle_message_v090` / `hook_llm_request_v090` / `hook_llm_response_v090` /
+`command_topic_v090` / `on_loaded_v090` 全是**模块级函数**，签名是 `(*args, **kwargs)`，
 参数靠 `_extract()` 用 `isinstance` 自己认。
 
 原因（实机日志）：

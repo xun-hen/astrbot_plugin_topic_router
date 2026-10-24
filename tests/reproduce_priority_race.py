@@ -12,9 +12,9 @@
     真正复现或反驳过。本脚本补上这一环。
 
 它验证 4 件事：
-    1. 真实注册表里，本插件 handler 的 priority 确实是 60、event_type 正确；
-    2. 真实派发循环里，priority 60 的入口确实排在 priority 50 的"防抖插件"之前；
-    3. 若某个更高优先级（70）的插件先静默事件，本插件入口**确实会被 break 跳过**
+    1. 真实注册表里，本插件 handler 的 priority 确实是 1000、event_type 正确；
+    2. 真实派发循环里，priority 1000 的入口确实排在 priority 50 的"防抖插件"之前；
+    3. 若某个更高优先级（1100）的插件先静默事件，本插件入口**确实会被 break 跳过**
        —— 即"入口零日志"这种现象是**真实可发生**的，不是取证失真；
     4. 事件被静默时，`on_llm_request` 钩子**照样会被触发** —— 精确复现实机上
        "只有钩子日志、没有入口日志"的那种矛盾形态。
@@ -316,13 +316,13 @@ def main() -> int:
             f"    {h.handler_name:28s} {h.event_type.name:22s} "
             f"priority={h.extras_configs.get('priority')}"
         )
-    entry_md = next((h for h in entries if h.handler_name == "handle_message_v017"), None)
+    entry_md = next((h for h in entries if h.handler_name == "handle_message_v090"), None)
     check("入口 handler 已注册", entry_md is not None)
     if entry_md is None:
         return 1
     check(
-        "入口 priority 为 60",
-        entry_md.extras_configs.get("priority") == 60,
+        "入口 priority 为 1000",
+        entry_md.extras_configs.get("priority") == 1000,
         str(entry_md.extras_configs),
     )
     check(
@@ -344,10 +344,10 @@ def main() -> int:
         )
     )
     order_names = [h.handler_name for h in ordered]
-    i_entry = order_names.index("handle_message_v017")
+    i_entry = order_names.index("handle_message_v090")
     i_comp = order_names.index("competitor_debounce_50")
     print(f"    顺序（前 6 项）: {order_names[:6]}")
-    check("priority 60 的入口排在 priority 50 的防抖插件之前", i_entry < i_comp,
+    check("priority 1000 的入口排在 priority 50 的防抖插件之前", i_entry < i_comp,
           f"entry@{i_entry} competitor@{i_comp}")
 
     # ------------------------------------------------------------------ 3
@@ -396,7 +396,7 @@ def main() -> int:
     )
 
     # 现在按真实顺序跑：入口应排在前面，所以它有机会执行
-    real_entry = router.handle_message_v017
+    real_entry = router.handle_message_v090
 
     async def spy_entry(*args, **kwargs):
         """包一层，记录是否真的被派发到。"""
@@ -426,7 +426,7 @@ def main() -> int:
     from astrbot.core.provider.entities import ProviderRequest  # noqa: PLC0415
 
     hook_calls: list[str] = []
-    real_hook = router.hook_llm_request_v017
+    real_hook = router.hook_llm_request_v090
 
     async def spy_hook(*args, **kwargs) -> None:
         """包一层，记录钩子被调用。"""
@@ -445,9 +445,9 @@ def main() -> int:
     )
 
     # ------------------------------------------------------------------ 5
-    print("\n[5] 反向验证：priority=70 的竞争者才能挡住入口（说明 60 不是万能）")
+    print("\n[5] 反向验证：priority=1100 的竞争者才能挡住入口（说明 1000 不是万能）")
     comp70 = register_competitor(
-        star_handlers_registry, reg, 70, "competitor_debounce_70"
+        star_handlers_registry, reg, 1100, "competitor_debounce_1100"
     )
     ordered70 = list(
         star_handlers_registry.get_handlers_by_event_type(
@@ -455,10 +455,10 @@ def main() -> int:
         )
     )
     names70 = [h.handler_name for h in ordered70]
-    i_entry70 = names70.index("handle_message_v017")
-    i_comp70 = names70.index("competitor_debounce_70")
+    i_entry70 = names70.index("handle_message_v090")
+    i_comp70 = names70.index("competitor_debounce_1100")
     print(f"    顺序（前 5 项）: {names70[:5]}")
-    check("priority 70 排在 priority 60 之前", i_comp70 < i_entry70,
+    check("priority 1100 排在 priority 1000 之前", i_comp70 < i_entry70,
           f"entry@{i_entry70} competitor@{i_comp70}")
 
     entry_hits: list[str] = []
@@ -505,7 +505,7 @@ def main() -> int:
     print(f"    only_activated=True 收集到: {collected_names}")
     check(
         "only_activated=True（waking_check 的真实用法）能收集到入口",
-        "handle_message_v017" in collected_names,
+        "handle_message_v090" in collected_names,
         str(collected_names),
     )
 
@@ -522,7 +522,7 @@ def main() -> int:
             ]
             check(
                 "plugin.activated=False 时入口会被静默排除（零日志的真实成因之一）",
-                "handle_message_v017" not in skipped,
+                "handle_message_v090" not in skipped,
                 str(skipped),
             )
         finally:
@@ -535,7 +535,7 @@ def main() -> int:
     #   @filter.event_message_type(ALL, priority=maxsize)
     #   async def handle_session_control_agent(self, event): ...
     #       if session_id in USER_SESSIONS: await SessionWaiter.trigger(...); event.stop_event()
-    # 这是本插件 priority=60 永远追不上的一层：60 < sys.maxsize。
+    # 这是本插件 priority=1000 永远追不上的一层：1000 < sys.maxsize。
     builtin = register_competitor(
         star_handlers_registry, reg, sys.maxsize, "builtin_session_control_maxsize"
     )
@@ -547,15 +547,15 @@ def main() -> int:
     names_max = [h.handler_name for h in ordered_max]
     print(f"    顺序（前 4 项）: {names_max[:4]}")
     i_builtin = names_max.index("builtin_session_control_maxsize")
-    i_entry_max = names_max.index("handle_message_v017")
+    i_entry_max = names_max.index("handle_message_v090")
     check(
-        "内置 maxsize handler 排在入口（60）之前",
+        "内置 maxsize handler 排在入口（1000）之前",
         i_builtin < i_entry_max,
         f"builtin@{i_builtin} entry@{i_entry_max}",
     )
     check(
         "sys.maxsize 确实大于 MESSAGE_PRIORITY",
-        sys.maxsize > 60,
+        sys.maxsize > 1000,
         f"maxsize={sys.maxsize}",
     )
 
@@ -578,7 +578,7 @@ def main() -> int:
     finally:
         entry_md.handler = original_max
     check(
-        "内置 handler 静默事件后入口零执行（抬 priority 到 60 无效）",
+        "内置 handler 静默事件后入口零执行（抬 priority 到 1000 无效）",
         hits_max == [] and event_e.is_stopped() is True,
         f"hits={hits_max} stopped={event_e.is_stopped()}",
     )

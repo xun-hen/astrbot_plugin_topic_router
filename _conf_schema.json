@@ -5,6 +5,200 @@
     "default": true,
     "hint": "关闭后所有判定和指令都不生效"
   },
+  "aggregation": {
+    "description": "消息聚合（内建）",
+    "type": "object",
+    "hint": "把用户连发的几条消息合并成一次处理，再在合并文本上做话题判定。整合自独立插件 astrbot_plugin_msg_aggregator，默认开启；关闭后本插件退化为逐条判定。",
+    "items": {
+      "enabled": {
+        "description": "启用插件",
+        "type": "bool",
+        "default": true,
+        "hint": "默认开启。开启后连续消息会先缓冲成一轮，再在合并文本上做一次话题判定；关闭则退化为 v0.8.6 的逐条即时判定（无额外等待）"
+      },
+      "preset": {
+        "description": "等待策略预设",
+        "type": "string",
+        "default": "balanced",
+        "options": [
+          "fast",
+          "balanced",
+          "patient"
+        ],
+        "hint": "fast=1.0s 固定等待；balanced=2.0s+自适应（默认）；patient=3.5s+自适应。切换后会把预设落成显式值，排障时能看到真实生效值"
+      },
+      "debounce_time": {
+        "description": "基础防抖等待（秒）",
+        "type": "float",
+        "default": 2.0,
+        "hint": "最后一条消息之后等这么久再处理。太短会把一句话切碎，太长会让用户觉得卡。1.5~3 之间比较合适"
+      },
+      "adaptive": {
+        "description": "按内容自适应延长等待",
+        "type": "bool",
+        "default": true,
+        "hint": "根据消息长度、结尾标点、连续短句动态调整等待时间。开启后长段落会自动多等一会儿，避免用户还没打完就被处理"
+      },
+      "adaptive_min_wait": {
+        "description": "自适应单次等待下限（秒）",
+        "type": "float",
+        "default": 1.0,
+        "hint": "自适应算出的等待不会低于这个值。与基础防抖一起决定最短等待"
+      },
+      "adaptive_max_wait": {
+        "description": "自适应单次等待上限（秒）",
+        "type": "float",
+        "default": 6.0,
+        "hint": "自适应算出的等待不会超过这个值"
+      },
+      "adaptive_max_total_wait": {
+        "description": "一轮总等待上限（秒）",
+        "type": "float",
+        "default": 12.0,
+        "hint": "从第一条消息算起，最多等这么久就必须处理，无论后续还有多少条。防止用户一直发、永远不结算"
+      },
+      "typing_detection": {
+        "description": "感知输入状态（能识别的平台才生效）",
+        "type": "bool",
+        "default": true,
+        "hint": "用户正在输入时暂停计时，停止输入后继续。仅部分平台（如 NapCat 的 input_status）提供该事件；不支持时自动忽略，不影响功能"
+      },
+      "max_typing_wait": {
+        "description": "输入状态最长暂停（秒）",
+        "type": "float",
+        "default": 60.0,
+        "hint": "万一平台发出「正在输入」却再也不发「停止」，用这个上限兜底"
+      },
+      "typing_feedback": {
+        "description": "等待期给用户反馈",
+        "type": "bool",
+        "default": true,
+        "hint": "等待期间尽量发送「正在输入」状态，避免用户以为机器人卡住。平台不支持时静默跳过"
+      },
+      "group_enabled": {
+        "description": "在群聊中启用合并",
+        "type": "bool",
+        "default": true,
+        "hint": "按「会话 + 发送者」分桶：同群不同人之间不会互相合并。注意群聊只处理已唤醒（@ 或唤醒前缀）的消息"
+      },
+      "min_interval_group": {
+        "description": "群聊同桶最小间隔（秒）",
+        "type": "float",
+        "default": 0.5,
+        "hint": "同一人在同一群的两次处理之间的最小间隔，防止高频刷屏。默认 0.5 秒"
+      },
+      "min_interval_private": {
+        "description": "私聊同桶最小间隔（秒）",
+        "type": "float",
+        "default": 0.0,
+        "hint": "私聊默认不限（0）"
+      },
+      "short_message_threshold": {
+        "description": "短句长度阈值（字）",
+        "type": "int",
+        "default": 10,
+        "hint": "不超过这个长度、且连续发送多条时，自适应会多等一会儿——这类消息通常是用户在边想边打"
+      },
+      "separator": {
+        "description": "合并时的分隔符",
+        "type": "string",
+        "default": "\n",
+        "hint": "多条消息拼成一段时用什么连接"
+      },
+      "preserve_part_order": {
+        "description": "保留图文交错顺序（实验性）",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭：合并结果是「所有文本 + 所有图片」。开启后按原始发送顺序还原图文交错，但部分下游可能不适应"
+      },
+      "command_prefixes": {
+        "description": "指令前缀",
+        "type": "list",
+        "default": [
+          "/"
+        ],
+        "hint": "以这些前缀开头的消息会立即打断当前聚合，不会被合并进去"
+      },
+      "recall_filter": {
+        "description": "过滤已撤回的消息",
+        "type": "bool",
+        "default": true,
+        "hint": "用户在等待期间撤回了某条消息，就不再把它算进合并结果。仅部分平台提供撤回事件；注意结算开始后到达的撤回不生效"
+      },
+      "keep_max_bytes": {
+        "description": "单张图片保留上限（字节）",
+        "type": "int",
+        "default": 20971520,
+        "hint": "默认 20 MiB。超过则跳过该图（文本仍保留）"
+      },
+      "keep_total_max_bytes": {
+        "description": "单条消息图片总量上限（字节）",
+        "type": "int",
+        "default": 52428800,
+        "hint": "默认 50 MiB"
+      },
+      "keep_round_max_bytes": {
+        "description": "单轮图片总量上限（字节）",
+        "type": "int",
+        "default": 83886080,
+        "hint": "默认 80 MiB。超限后跳过后续图片，但文本仍会入队"
+      },
+      "cache_dir_ttl_hours": {
+        "description": "图片缓存保留时长（小时）",
+        "type": "float",
+        "default": 24.0,
+        "hint": "图片会被复制到插件数据目录以便跨消息保留，超过这个时间且未被引用的缓存会被清理"
+      },
+      "interrupt_wait": {
+        "description": "指令打断的等待上限（秒）",
+        "type": "float",
+        "default": 2.0,
+        "hint": "遇到指令时先把正在进行的聚合结算完再放行指令，最多等这么久；超时会放弃该轮（避免指令被卡住）"
+      },
+      "enrich_deadline": {
+        "description": "增强处理的总预算（秒）",
+        "type": "float",
+        "default": 12.0,
+        "hint": "装了增强包（如链接抓取）时的最长处理时间。未装增强包时该值几乎不影响"
+      },
+      "stats_flush_interval": {
+        "description": "统计落盘间隔（秒）",
+        "type": "float",
+        "default": 60.0,
+        "hint": "统计先攒在内存、定期落盘，重启后不清零。写盘敏感的场景（小主机/SSD）可以调大"
+      },
+      "stats_flush_every": {
+        "description": "累计多少轮结算后也落盘一次",
+        "type": "int",
+        "default": 50,
+        "hint": "与上面的间隔先到者生效。低频场景靠它兜底，避免很久才落一次盘"
+      },
+      "stats_max_dimensions": {
+        "description": "统计维度上限",
+        "type": "int",
+        "default": 128,
+        "hint": "按会话/发送者统计时最多保留多少个键。超出后新键不再计入（页面会提示「另 N 次未计入」），防止群聊多会话时内存无界增长"
+      },
+      "stats_history_size": {
+        "description": "保留最近多少轮处理记录",
+        "type": "int",
+        "default": 200,
+        "hint": "0 表示只留计数、不留历史明细。记录里只有计数与耗时，不含消息内容"
+      },
+      "page_enabled": {
+        "description": "启用插件可视化页面",
+        "type": "bool",
+        "default": true,
+        "hint": "在 WebUI 的插件详情页提供运行状态与统计面板。关闭后不注册页面后端接口（公开部署的 WebUI 可以考虑关闭）"
+      },
+      "page_push_interval": {
+        "description": "页面实时推送间隔（秒）",
+        "type": "float",
+        "default": 1.0,
+        "hint": "面板多久推送一次摘要。只在数据有变化时才推，空闲时零流量。0.5~10 之间"
+      }
+    }
+  },
   "mode": {
     "description": "判定后的行为",
     "type": "string",
@@ -87,7 +281,7 @@
     "description": "在「向模型发起请求时」的钩子里也执行判定",
     "type": "bool",
     "default": true,
-    "hint": "强烈建议保持开启。只要有优先级高于本插件（60）的插件先跑并静默消息事件，本插件的消息入口就可能一次都执行不到。该钩子不在插件排队循环里，不受优先级与事件静默影响；两条路通过去重互斥，不会重复判定"
+    "hint": "强烈建议保持开启。v0.9.0 起判定主路径在消息入口的聚合阶段；本钩子是**兜底**：仅在入口没被派发（被更高优先级插件静默）或聚合关闭且入口未判定时执行。它不在插件排队循环里，不受优先级与事件静默影响；已判过的消息不会重复判定。"
   },
   "timeout_seconds": {
     "description": "判定模型超时（秒）",

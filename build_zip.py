@@ -8,6 +8,7 @@ AstrBot 的收尾步骤 `_finalize_extracted_archive` 会在 `os.listdir(插件�
 
 * 条目名一律用 `/`；
 * 目录条目带结尾 `/`，让 `_resolve_archive_root_dir` 能识别出根目录；
+* 递归带上 `aggregation/`（内建消息聚合）与 `pages/`（插件详情页）；
 * 不包含 `tests/` 子目录 —— 有子目录时 update_dir 会退化成整个插件根目录，
   收尾步骤会把目录往它自己里面搬。
 
@@ -25,13 +26,10 @@ from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 PACKAGE_NAME = "astrbot_plugin_topic_router_pro"
-# 打进包里的内容；tests/ 只在本地跑，不进安装包
-INCLUDE_FILES = (
-    "__init__.py",
-    "main.py",
-    "router.py",
-    "detection.py",
-    "state.py",
+
+# 根目录下必须进包的非 .py 文件；根目录 *.py 由 collect_entries() 自动发现。
+# 为什么不再手写 .py 清单：聚合成包后新增模块很容易漏（漏了就是安装后 ImportError）。
+REQUIRED_ROOT_FILES = (
     "metadata.yaml",
     "_conf_schema.json",
     "logo.png",
@@ -40,7 +38,10 @@ INCLUDE_FILES = (
     "requirements.txt",
     "LICENSE",
 )
-EXCLUDE_DIRS = {"__pycache__", "tests", ".git"}
+EXCLUDE_ROOT_PY = {"build_zip.py"}
+# 需要递归打进包里的子目录（页面、内建聚合模块、插件 i18n 都是功能的一部分）
+INCLUDE_DIRS = ("aggregation", "pages", ".astrbot-plugin")
+EXCLUDE_DIRS = {"__pycache__", "tests", ".git", "dist", "tools"}
 
 
 def read_version() -> str:
@@ -175,6 +176,54 @@ def check_changelog_format() -> list[str]:
     return problems
 
 
+def collect_entries() -> list[tuple[str, bytes]]:
+    """收集要写进包里的条目（相对包名的路径, 内容）。
+
+    Returns:
+        条目列表。
+
+    Raises:
+        SystemExit: 缺少必需文件或没有任何 .py。
+    """
+    entries: list[tuple[str, bytes]] = []
+
+    py_files = sorted(
+        path
+        for path in PLUGIN_DIR.glob("*.py")
+        if path.is_file() and path.name not in EXCLUDE_ROOT_PY
+    )
+    if not py_files:
+        raise SystemExit("插件根目录下没有任何 .py，无法打包")
+    if not any(path.name == "main.py" for path in py_files):
+        raise SystemExit("缺少 main.py（AstrBot 从它里面找 Star 子类）")
+
+    missing = [
+        name for name in REQUIRED_ROOT_FILES if not (PLUGIN_DIR / name).is_file()
+    ]
+    if missing:
+        raise SystemExit(f"缺少文件，无法打包：{', '.join(missing)}")
+
+    for path in py_files:
+        entries.append((f"{path.name}", path.read_bytes()))
+    for name in REQUIRED_ROOT_FILES:
+        entries.append((f"{name}", (PLUGIN_DIR / name).read_bytes()))
+
+    for dirname in INCLUDE_DIRS:
+        root = PLUGIN_DIR / dirname
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            if any(part in EXCLUDE_DIRS for part in path.parts):
+                continue
+            if path.suffix in {".pyc"}:
+                continue
+            rel = path.relative_to(PLUGIN_DIR).as_posix()
+            entries.append((rel, path.read_bytes()))
+    return entries
+
+
 def build(output: Path) -> Path:
     """写出 zip。
 
@@ -185,9 +234,6 @@ def build(output: Path) -> Path:
         实际写出的路径。
     """
     output.parent.mkdir(parents=True, exist_ok=True)
-    missing = [name for name in INCLUDE_FILES if not (PLUGIN_DIR / name).is_file()]
-    if missing:
-        raise SystemExit(f"缺少文件，无法打包：{', '.join(missing)}")
 
     problems = check_version_consistency()
     if problems:
@@ -203,16 +249,14 @@ def build(output: Path) -> Path:
     if problems:
         raise SystemExit("CHANGELOG 格式不合规，先改好再打包：\n  - " + "\n  - ".join(problems))
 
+    entries = collect_entries()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
         # 目录条目是必需的：AstrBot 靠它 + 子条目前缀来推断"压缩包里的根目录"，
         # 也靠它让解包真的建出这一层目录。缺了它，收尾步骤会在
         # os.listdir(<target>/<包名>) 上抛 FileNotFoundError。
         zf.writestr(f"{PACKAGE_NAME}/", b"")
-        for name in INCLUDE_FILES:
-            zf.writestr(
-                f"{PACKAGE_NAME}/{name}",
-                (PLUGIN_DIR / name).read_bytes(),
-            )
+        for name, data in entries:
+            zf.writestr(f"{PACKAGE_NAME}/{name}", data)
     return output
 
 

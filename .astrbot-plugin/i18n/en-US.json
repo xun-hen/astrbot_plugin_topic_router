@@ -1,0 +1,27 @@
+{
+  "metadata": {
+    "display_name": "Topic Router PRO"
+  },
+  "views": {
+    "status": {
+      "title": "Aggregation status",
+      "description": "Aggregation state, merge ratio, latency distribution and recent rounds. Read-only except preset switching and stats reset.",
+      "heading": "Aggregation status",
+      "live_on": "Live",
+      "live_polling": "Polling (SSE unavailable)",
+      "live_error": "Live stream lost, falling back to polling",
+      "no_bridge": "This Dashboard does not support plugin views (no bridge). Please upgrade AstrBot."
+    }
+  },
+  "pages": {
+    "status": {
+      "title": "Aggregation status",
+      "description": "Aggregation state, merge ratio, latency distribution and recent rounds. Read-only except preset switching and stats reset.",
+      "heading": "Aggregation status",
+      "live_on": "Live",
+      "live_polling": "Polling (SSE unavailable)",
+      "live_error": "Live stream lost, falling back to polling",
+      "no_bridge": "This Dashboard does not support plugin views (no bridge). Please upgrade AstrBot."
+    }
+  }
+}

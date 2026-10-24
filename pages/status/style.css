@@ -1,0 +1,166 @@
+/* 零依赖：不引入任何 CSS 框架与图标字体。主题走 Dashboard 注入的 data-theme。 */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --panel: #f9fafb;
+  --accent: #1f4e79;
+  --accent-soft: #dbeafe;
+  --warn: #b45309;
+  --danger: #b91c1c;
+  --bar: #2e5c8a;
+}
+
+[data-theme="dark"] {
+  --bg: #16181c;
+  --fg: #e6e8eb;
+  --muted: #9aa3ad;
+  --line: #2a2e35;
+  --panel: #1d2025;
+  --accent: #7fb3e8;
+  --accent-soft: #1e3a5f;
+  --warn: #f0b429;
+  --danger: #f87171;
+  --bar: #4b83c4;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 16px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.6 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+}
+
+h2 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.muted { color: var(--muted); font-weight: 400; font-size: 12px; }
+
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+}
+
+.bar-title { display: flex; align-items: center; gap: 8px; }
+.bar-title strong { font-size: 16px; }
+.bar-actions { display: flex; align-items: center; gap: 8px; }
+
+.dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--muted); flex: none;
+}
+.dot.ok { background: #16a34a; }
+.dot.wait { background: var(--warn); }
+.dot.bad { background: var(--danger); }
+
+select, button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button.ghost { background: transparent; }
+button:disabled { opacity: .5; cursor: default; }
+
+.fatal {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.card {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.card-label { color: var(--muted); font-size: 12px; }
+.card-value { font-size: 24px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.card-hint { color: var(--muted); font-size: 11px; }
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.panel {
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.bars { display: flex; flex-direction: column; gap: 8px; }
+
+.bar-row { display: grid; grid-template-columns: 96px 1fr 48px; gap: 8px; align-items: center; }
+.bar-row .name { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-row .track { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
+.bar-row .fill { height: 100%; background: var(--bar); border-radius: 5px; }
+.bar-row .num { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; }
+
+.latency svg { width: 100%; height: 140px; display: block; }
+.latency-meta { display: flex; gap: 16px; margin-top: 6px; color: var(--muted); font-size: 12px; }
+.latency-meta b { color: var(--fg); font-variant-numeric: tabular-nums; }
+
+.table-wrap { overflow-x: auto; }
+
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tag.done { background: color-mix(in srgb, #16a34a 15%, transparent); color: #15803d; }
+.tag.abort { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
+
+.empty { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+
+.notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-left-width: 3px;
+  border-radius: 8px;
+  color: var(--warn);
+  font-size: 12.5px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}

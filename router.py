@@ -17,7 +17,7 @@ handler 全部不再执行**——表现就是"插件明明加载了，判定日
 
 1. **状态一律放模块级单例 `RUNTIME`**，方法体只读模块级变量，绝不 `self.xxx`；
 2. 共享逻辑写成**模块级函数**，上下文作为第一个参数显式传入（`ctx`）；
-3. 三个 handler（`handle_message_v017` / `hook_llm_request_v017` / `command_topic_v017`）
+3. 三个 handler（`handle_message_v090` / `hook_llm_request_v090` / `command_topic_v090`）
    只做"从参数里认出对象 → 转调模块函数"，参数识别只用 `isinstance`；
 4. handler 方法名**带版本号**：AstrBot 的 `get_handler_or_create` 用
    `f"{模块}_{函数名}"` 当注册表键（4.28.1 `core/star/register/star_handler.py:38`），
@@ -48,6 +48,19 @@ v0.8.4 在 AstrBot 4.28.1 实机重新取证（`trace.log` 落盘探针 + 双重
    算 `umo` 与去重键，**不要再依赖从 prompt 里抠文本**（那只是老框架的兜底）；
 8. 消息事件入口保留为"可选快通道"，但**不得作为判定的唯一依赖**——
    实测它可能一条都不执行。
+
+## v0.9.0：把「消息聚合」内建为判定流水线的第一阶段
+
+用户把一句话拆成三条发时，逐条判定会把 `turns` 推快三倍、把同一件事判成三次。
+v0.9.0 把独立插件 `astrbot_plugin_msg_aggregator` 的核心迁入 `aggregation/`：
+
+* 消息入口优先级取插件层顶格 **1000**（不再是 60）：聚合必须尽最大可能**先于**
+  普通插件看到消息，否则别人 `stop_event()` 之后连缓冲的机会都没有；
+* 缓冲/自适应等待/重构/附件保活完成后，**在合并文本上做一次**话题判定
+  （`AggregationService.on_settled` 回调），下游拿到的是合并后的一轮消息；
+* 请求钩子保留为**兜底**：入口没被判派发（`_topic_router_seen_v090` 缺失）时
+  仍然判定，并把"被抢占"落成 `aggregate.preempted` 告警；
+* `aggregation.enabled=false` 时退化成 v0.8.6 的行为（每条消息即时判定）。
 """
 
 from __future__ import annotations
@@ -147,27 +160,33 @@ CROSS_PATH_DEDUP_WINDOW = 60.0
 
 # 消息事件处理器的优先级。
 #
-# 为什么必须显式声明（v0.8.0 的实机故障）：AstrBot 的处理器循环是
-#     for handler in activated_handlers:
-#         if event.is_stopped(): break
-# 且注册表按 `-priority` 排序、未声明者默认 0。装了"消息防抖动 / 连续消息合并"这类
-# 插件时，若它们的优先级高于本插件，就会先跑并静默事件
-# （`event._force_stopped = True`），于是本插件**一次都执行不到**。
+# v0.9.0 起取 **1000**（插件层顶格）：消息聚合必须尽最大可能先于普通插件看到
+# 消息——一旦别人先 `stop_event()`，派发循环 break，我们就连缓冲的机会都没有。
 #
-# 取 60：高于常见的防抖/合并类插件（实测 `astrbot_plugin_continuous_message` 是 50，
-# 见 tests/reproduce_priority_race.py 在真实注册表上的顺序验证），又远低于 AstrBot
-# 内置指令（通常很高）。而且本处理器只判定与记录、不 stop_event、不发消息，提前执行
-# 不会干扰别人的合并与静默逻辑。
+# 为什么不是 60（v0.8.x 的值）：60 只保证"比常见防抖插件（50）高"，实机仍观测到
+# ENTRY=0。为什么不是 `sys.maxsize`：框架内置的 `handle_session_control_agent`
+# 正是该值，并列时的先后取决于注册顺序，我们控制不了，也不该跟会话控制抢位。
 #
-# **注意（v0.8.4 定案）**：60 只保证"比 50 高"，**不保证"比所有执行者都高"**。
-# 实机已确认入口在进入函数体前就被挡掉（`trace.log` 里 ENTRY=0、VERDICT 全部
-# via=hook）。能把入口挡住的只有优先级高于 60 的执行者，而框架内置的
-# `handle_session_control_agent` 挂在 `sys.maxsize`（`builtin_stars/astrbot/main.py:44`，
-# 命中 `USER_SESSIONS` 时 `event.stop_event()`）——**60 永远追不上**。
-#
-# 所以不要再靠抬这个数字去修"入口不执行"：判定主战场已迁到 `on_llm_request`
-# 钩子（见 `hook_llm_request_v017` 的文档串）。这个 60 现在只是"快通道尽量早点跑"。
-MESSAGE_PRIORITY = 60
+# 1000 只降低被抢占概率，**不提供保证**。保证来自请求钩子里的抢占检测：
+# 入口没跑（`SEEN_ATTR` 缺失）时，钩子仍然能判定，并把这次抢占落成
+# `aggregate.preempted` 告警。先跑是优化，被抢占也能被发现。
+MESSAGE_PRIORITY = 1000
+
+SEEN_ATTR = "_topic_router_seen_v090"
+"""事件对象上的"消息入口执行过"标记（与 `aggregation.service` 共用）。
+
+入口第一件事就是打这个标记；请求钩子据此区分"入口没被派发（被抢占）"与
+"入口跑了但这一轮不需要判定"。事件对象在整条管线里是同一个实例，属性随事件
+回收，不会泄漏。
+"""
+
+DETECTED_ATTR = "_topic_router_detected_v090"
+"""事件对象上的"话题判定已尝试过"标记。
+
+在调用 `_detect` **之前**置位：判定失败也按延续处理，不需要钩子再试一次；
+否则一次模型超时会变成两次（事件路 + 钩子路），把延迟翻倍。
+"""
+
 
 
 def _hook_user_message(event: Any, req: Any) -> str:
@@ -315,10 +334,18 @@ class _Runtime:
     last_detect: dict[str, float] = {}
     """去重表：{"<umo>|text:<归一化文本前120字>": 时间戳}。
 
-    判定有两条路：消息事件（`handle_message_v017`）与请求钩子
-    （`hook_llm_request_v017`）。两条路都可能先到，靠它保证同一段文本只判一次。
+    判定有两条路：消息事件（`handle_message_v090`）与请求钩子
+    （`hook_llm_request_v090`）。两条路都可能先到，靠它保证同一段文本只判一次。
     只放内存：重启后重复判一次无害，落盘反而要处理淘汰策略。
     """
+    aggregation: Any = None
+    """内建消息聚合服务（`aggregation.service.AggregationService`）。
+
+    为 None 表示聚合关闭或初始化失败——此时消息入口退化成"每条消息即时判定"。
+    实例挂在模块级而不是 `self` 上，理由同文件头：handler 的 `self` 可能不是插件实例。
+    """
+    aggregation_error: str = ""
+    """聚合初始化失败的原因（空串表示没有失败，或聚合被显式关闭）。"""
 
 
 RUNTIME = _Runtime()
@@ -503,6 +530,122 @@ def _plugin_data_dir() -> Path:
         数据目录路径。
     """
     return _data_root() / "plugin_data" / PLUGIN_NAME
+
+
+def _mark_event(event: Any, attr: str) -> None:
+    """给事件对象打一个临时标记（打不上也不致命）。
+
+    Args:
+        event: 消息事件。
+        attr: 属性名。
+    """
+    try:
+        setattr(event, attr, True)
+    except Exception:  # noqa: BLE001 - 少数事件对象可能有 __slots__
+        pass
+
+
+def _event_marked(event: Any, attr: str) -> bool:
+    """判断事件对象上有没有某个标记。
+
+    Args:
+        event: 消息事件。
+        attr: 属性名。
+
+    Returns:
+        True 表示有标记。
+    """
+    try:
+        return bool(getattr(event, attr, False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _aggregation_config() -> dict[str, Any]:
+    """取 `aggregation` 子配置（容错成空字典）。
+
+    Returns:
+        配置字典。
+    """
+    raw = RUNTIME.config.get("aggregation", {})
+    return raw if isinstance(raw, dict) else {}
+
+
+def _init_aggregation(ctx: Context | None) -> None:
+    """按配置创建内建聚合服务（关闭时什么都不做）。
+
+    失败只记 `aggregation_error` 并退化成"每条消息即时判定"，绝不让插件加载失败。
+
+    Args:
+        ctx: 插件上下文。
+    """
+    if RUNTIME.aggregation is not None:
+        return
+    # 总开关关闭时连聚合都不该启动：否则它会缓冲并静默消息，却又不做判定，
+    # 用户看到的是"消息被吞了但机器人不回"。判定层自己有 enabled 检查，
+    # 但聚合层必须在更前面就停下。
+    if not _flag("enabled", True):
+        logger.info(f"[{PLUGIN_NAME}] 插件总开关关闭，消息聚合不启动")
+        return
+    raw = _aggregation_config()
+    # 缺省开启：整合之后的默认形态就是"先聚合、再判定"。
+    # 想恢复 v0.8.6 的逐条判定，把 aggregation.enabled 设为 false。
+    enabled = raw.get("enabled", True)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() in {"1", "true", "yes", "on"}
+    if not bool(enabled):
+        logger.info(f"[{PLUGIN_NAME}] 消息聚合已关闭，按每条消息即时判定")
+        return
+    try:
+        from .aggregation import AggregationService
+
+        service = AggregationService(
+            ctx,
+            raw,
+            data_dir=_plugin_data_dir(),
+            seen_attr=SEEN_ATTR,
+        )
+        service.on_settled = _on_aggregated
+        RUNTIME.aggregation = service
+        RUNTIME.aggregation_error = ""
+    except Exception as exc:  # noqa: BLE001 - 聚合不可用不能拖垮判定
+        RUNTIME.aggregation_error = f"{type(exc).__name__}: {exc}"
+        RUNTIME.aggregation = None
+        logger.error(
+            f"[{PLUGIN_NAME}] 消息聚合初始化失败，已退化为逐条判定："
+            f"{RUNTIME.aggregation_error}"
+        )
+
+
+async def _on_aggregated(event: Any, text: str) -> None:
+    """聚合完成后的判定回调（在合并文本上判一次）。
+
+    Args:
+        event: Owner 事件（已重构为合并后的消息）。
+        text: 合并后的文本。
+    """
+    if not text.strip():
+        return
+    _mark_event(event, DETECTED_ATTR)
+    try:
+        await _detect(_ctx(), event, text, umo=_umo(event))
+    except Exception as exc:  # noqa: BLE001 - 判定失败绝不影响正常回复
+        logger.warning(
+            f"[{PLUGIN_NAME}] 聚合后判定异常（已兜住）：{type(exc).__name__}: {exc}"
+        )
+
+
+def _looks_like_command(text: str) -> bool:
+    """粗略判断是否是指令文本（用于避免把指令当成用户消息判定）。
+
+    Args:
+        text: 消息文本。
+
+    Returns:
+        True 表示看起来像指令。
+    """
+    stripped = (text or "").lstrip()
+    return stripped.startswith(("/", "／"))
 
 
 def _trace(tag: str, umo: str = "-", extra: str = "") -> None:
@@ -1232,14 +1375,48 @@ class TopicRouterPlugin(Star):
         RUNTIME.store = TopicStore(data_dir / "topic_state.json")
         RUNTIME.recent = {}
         RUNTIME.pending_actions = {}
+        RUNTIME.aggregation = None
+        RUNTIME.aggregation_error = ""
+
+        # 内建消息聚合：默认开启，初始化失败自动退化为逐条判定
+        _init_aggregation(context)
 
         logger.info(
             f"[{PLUGIN_NAME}] 实例已构造 {PLUGIN_VERSION} "
-            f"| file={Path(__file__).resolve()} | mode={_mode()}"
+            f"| file={Path(__file__).resolve()} | mode={_mode()} "
+            f"| 聚合={'开' if RUNTIME.aggregation is not None else '关'}"
         )
 
+    async def initialize(self) -> None:
+        """插件加载完成：启动聚合后台任务并注册可视化页面后端。
+
+        AstrBot 的调用点是 `await metadata.star_cls.initialize()`（实例方法），
+        所以这里必须是协程；`service.initialize()` 本身是同步的（注册路由 + 建后台任务），
+        不需要再套一层 await。
+        """
+        service = RUNTIME.aggregation
+        if service is None:
+            if RUNTIME.aggregation_error:
+                logger.warning(
+                    f"[{PLUGIN_NAME}] 聚合不可用，继续以逐条判定运行："
+                    f"{RUNTIME.aggregation_error}"
+                )
+            return
+        try:
+            service.initialize()
+        except Exception as exc:  # noqa: BLE001 - 页面/后台任务失败不能拖垮判定
+            logger.warning(
+                f"[{PLUGIN_NAME}] 聚合阶段初始化失败（判定不受影响）：{exc}"
+            )
+
     async def terminate(self) -> None:
-        """插件卸载/停用时保存状态。"""
+        """插件卸载/停用时保存状态，并优雅关停聚合。"""
+        service = RUNTIME.aggregation
+        if service is not None:
+            try:
+                await service.shutdown()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[{PLUGIN_NAME}] 关停聚合失败: {exc}")
         try:
             _store().save()
         except Exception as exc:  # noqa: BLE001
@@ -1268,8 +1445,12 @@ class TopicRouterPlugin(Star):
 
 
 @filter.event_message_type(filter.EventMessageType.ALL, priority=MESSAGE_PRIORITY)
-async def handle_message_v017(*args: Any, **kwargs: Any):
-    """主判定入口：消息事件。
+async def handle_message_v090(*args: Any, **kwargs: Any):
+    """消息入口：聚合（默认）→ 在合并文本上判定一次。
+
+    这是 v0.9.0 的**第一阶段**：优先级 1000，尽最大可能先于普通插件拿到消息。
+    聚合开启时把连续消息缓冲成一轮（见 `aggregation/service.py`），重构事件后
+    通过 `on_settled` 回调在合并文本上判定一次；聚合关闭时退化成逐条即时判定。
 
     **入口日志是必需的**：AstrBot 的 `star_request.py` 是
     `for handler in activated_handlers: if event.is_stopped(): break`，任何一个
@@ -1299,59 +1480,72 @@ async def handle_message_v017(*args: Any, **kwargs: Any):
     except Exception:  # noqa: BLE001
         pass
     logger.info(
-        f"[{PLUGIN_NAME}] handle_message_v017 被调用 | {PLUGIN_VERSION} "
+        f"[{PLUGIN_NAME}] handle_message_v090 被调用 | {PLUGIN_VERSION} "
         f"| umo={getattr(event, 'unified_msg_origin', '?')} "
         f"| msg={message[:40]!r} | stopped={stopped} "
+        f"| 聚合={'开' if RUNTIME.aggregation is not None else '关'} "
         f"| args={[type(a).__name__ for a in args]}"
     )
-    if event is not None and message:
-        try:
-            await _detect(_ctx(), event, message)
-        except Exception as exc:  # noqa: BLE001
-            # 判定层绝不能把异常抛出去：会被 stop_event()，连累同一条消息上的
-            # 其它插件（这个坑我们踩过）。
-            logger.error(
-                f"[{PLUGIN_NAME}] 判定异常（已兜住，不影响其它插件）：{exc}",
-                exc_info=True,
-            )
+    if event is not None:
+        # 先打"入口执行过"标记：抢占检测靠它区分"没被派发到"与"不需要处理"。
+        _mark_event(event, SEEN_ATTR)
+        service = RUNTIME.aggregation
+        if service is not None:
+            try:
+                await service.handle(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 绝不让异常外泄
+                # 聚合层绝不能把异常抛出去：会被 stop_event()，连累同一条消息上的
+                # 其它插件（这个坑我们踩过）。
+                logger.error(
+                    f"[{PLUGIN_NAME}] 聚合异常（已兜住，不影响其它插件）：{exc}",
+                    exc_info=True,
+                )
+                try:
+                    service.panic_release(event)
+                except Exception:  # noqa: BLE001
+                    pass
+        elif message and not _looks_like_command(message):
+            # 聚合关闭（或初始化失败）：保持 v0.8.6 的逐条判定语义
+            _mark_event(event, DETECTED_ATTR)
+            try:
+                await _detect(_ctx(), event, message)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    f"[{PLUGIN_NAME}] 判定异常（已兜住，不影响其它插件）：{exc}",
+                    exc_info=True,
+                )
     return
     yield  # pragma: no cover - 让它是异步生成器，框架两种形态都接受
 
 
 @filter.on_llm_request(priority=MESSAGE_PRIORITY)
-async def hook_llm_request_v017(*args: Any, **kwargs: Any) -> None:
-    """请求钩子：**判定主战场** + `hint` / `auto` 的请求改写。
+async def hook_llm_request_v090(*args: Any, **kwargs: Any) -> None:
+    """请求钩子：**判定兜底** + `hint` / `auto` 的请求改写。
 
-    ## 为什么判定主战场在这里（v0.8.4 定案，别再改回去）
+    ## v0.9.0 的职责变化
 
-    消息事件处理器排在一个**按优先级降序执行、遇到 `event.is_stopped()` 就 break**
-    的循环里。只要有**优先级高于本插件**的执行者先跑并静默事件，排在后面的消息
-    处理器就**一次都不会执行**。实机取证（`trace.log` 落盘探针 + 双重标记）：
+    判定主路径已经前移到消息入口（`handle_message_v090` 的聚合阶段）：合并完成、
+    事件重构之后立即在合并文本上判一次。本钩子现在负责两件事：
 
-        ENTRY 行 = 0     # handle_message_v017 从未进入函数体
-        HOOK  行 = 7     # 本钩子正常
-        VERDICT 行 = 7   # 判定正常，且全部 via=hook，无一条 via=event
+    1. **兜底判定**：消息入口没被派发（被更高优先级者 `stop_event()` 了）时，
+       这里仍然能判定，并把这次抢占落成 `aggregate.preempted` 告警。本钩子不在
+       `star_request.py` 的 `is_stopped()` break 循环里，任何优先级都挡不住它；
+    2. **请求改写**：`hint` / `auto` 的动作要落到 `ProviderRequest` 上，只能在
+       这里执行（`_detect` 先把动作挂进 `RUNTIME.pending_actions`）。
 
-    即**主入口在进函数体之前就被挡掉了**，而本钩子一直正常工作。本钩子**不在那个
-    循环里**，不受优先级与事件静默影响——这是它作为主战场的根本理由。
+    ## 为什么不能在这里无条件重判
 
-    ⚠️ **不要在这里写"某个具体插件挡住了我们"**：
-    `tests/reproduce_priority_race.py` 在真实注册表上验证过顺序，
-    `astrbot_plugin_continuous_message`（priority=50）**排在**本插件（60）**之后**，
-    根本没有机会先静默事件。v0.8.0 曾把"入口零调用"归因于它，那个归因是**错的**。
-    能把入口挡住的只有优先级高于 60 的执行者——而框架内置的
-    `handle_session_control_agent` 挂在 `sys.maxsize`（`builtin_stars/astrbot/main.py:44`），
-    **60 永远追不上**。所以"抬优先级"这条路本身就不成立。
+    聚合开启时，入口已经在合并文本上判过（`DETECTED_ATTR`）；再判一次会把
+    `turns` 推快、把模型调用翻倍。所以只有"入口没被派发"或"聚合关闭且入口没判"
+    时才走兜底。去重仍然是第二道保险（见 `_detect` 的 `_batch_key`）。
 
-    ## 本钩子能拿到事件对象（别再以为拿不到）
+    ## 本钩子能拿到事件对象
 
     `call_event_hook` 是 `await handler.handler(event, *args)`，实机为
     `args=['WeixinOCMessageEvent','ProviderRequest']`、`has_event=True`。
     所以这里优先用事件取消息与 `umo`，只有老框架拿不到事件时才退回从 prompt 抠。
-
-    两路互斥靠 `_detect` 里的去重：带上平台消息 ID 时两路共用同一把锁
-    （见 `CROSS_PATH_DEDUP_WINDOW` 的说明）。注意**任何一条路都不按文本拦**，
-    用户重发同一句话必须算新一轮。
 
     Args:
         *args: 派发方给的位置参数（实机上只有 `ProviderRequest`）。
@@ -1362,30 +1556,54 @@ async def hook_llm_request_v017(*args: Any, **kwargs: Any) -> None:
     _trace(
         "HOOK",
         event_umo or "-",
-        f"| v={PLUGIN_VERSION} | role=primary "
+        f"| v={PLUGIN_VERSION} | role=fallback "
         f"| has_event={event is not None} "
         f"| has_request={req is not None} "
         f"| prompt_len={len(getattr(req, 'prompt', '') or '') if req is not None else 0}",
     )
     logger.info(
-        f"[{PLUGIN_NAME}] hook_llm_request_v017 被调用 | {PLUGIN_VERSION} "
+        f"[{PLUGIN_NAME}] hook_llm_request_v090 被调用 | {PLUGIN_VERSION} "
         f"| has_event={event is not None} | has_request={req is not None} "
         f"| args={[type(a).__name__ for a in args]} | kwargs={sorted(kwargs)}"
     )
     if req is None:
         return
     ctx = _ctx()
+    service = RUNTIME.aggregation
 
-    # --- 1) 判定：这里是**判定主战场**（v0.8.4 定案） ---
-    # 实测消息事件入口可能一次都不执行（ENTRY=0），所以判定不能押在它身上。
-    # 本钩子不在 `star_request.py` 的 `is_stopped()` break 循环里，不受优先级竞争影响。
-    if _flag("detect_in_hook", True):
+    # --- 1) 抢占检测：入口没跑就等于被更高优先级者挤掉了 ---
+    seen = event is not None and _event_marked(event, SEEN_ATTR)
+    if event is not None and not seen and service is not None:
+        try:
+            if service.check_preempted(event):
+                _trace(
+                    "PREEMPTED",
+                    event_umo,
+                    f"| v={PLUGIN_VERSION} | priority={MESSAGE_PRIORITY} "
+                    f"| msg={(getattr(event, 'message_str', '') or '')[:60]!r}",
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[{PLUGIN_NAME}] 抢占检测异常（已忽略）：{exc}")
+
+    # --- 2) 兜底判定：只在入口没判过时执行 ---
+    detected = event is not None and _event_marked(event, DETECTED_ATTR)
+    aggregation_active = service is not None and bool(
+        getattr(getattr(service, "cfg", None), "enabled", False)
+    )
+    fallback = (
+        event is None
+        or not seen
+        or (not aggregation_active and not detected)
+    )
+    if _flag("detect_in_hook", True) and fallback:
         message = _hook_user_message(event, req)
         # 有事件对象时**以事件为准**：`_umo(event)` 是权威的会话标识，
         # `_batch_key` 也能算出消息 ID 键，两路因此共用同一把去重锁。
         # 拿不到事件（老版本框架）才退回从 prompt 抠文本、按文本去重。
         umo = event_umo or _umo_from_request(req)
-        if message:
+        if message and not _looks_like_command(message):
+            if event is not None:
+                _mark_event(event, DETECTED_ATTR)
             try:
                 await _detect(ctx, event, message, umo=umo, via_hook=True)
             except Exception as exc:  # noqa: BLE001 - 判定失败绝不影响正常回复
@@ -1393,9 +1611,9 @@ async def hook_llm_request_v017(*args: Any, **kwargs: Any) -> None:
                     f"[{PLUGIN_NAME}] 钩子内判定异常（已兜住）：{type(exc).__name__}: {exc}"
                 )
         else:
-            logger.debug(f"[{PLUGIN_NAME}] 钩子里没取到用户消息，跳过本轮判定")
+            logger.debug(f"[{PLUGIN_NAME}] 钩子里没取到可判定的用户消息，跳过本轮判定")
 
-    # --- 2) 请求改写：执行 `_detect` 挂起的 hint / auto 动作 ---
+    # --- 3) 请求改写：执行 `_detect` 挂起的 hint / auto 动作 ---
     # 这一条**必须有事件对象**（改写要落到具体会话上）；拿不到就跳过，
     # 等消息事件那条路（如果它还活着）或下一轮处理。
     if event is None:
@@ -1407,7 +1625,7 @@ async def hook_llm_request_v017(*args: Any, **kwargs: Any) -> None:
 
 
 @filter.on_llm_response()
-async def hook_llm_response_v018(*args: Any, **kwargs: Any) -> None:
+async def hook_llm_response_v090(*args: Any, **kwargs: Any) -> None:
     """记下机器人这一轮的回复，供下一次判定使用。
 
     判定模型需要"上一轮答了什么"才能判断承接关系：很多换话题发生在回答之后
@@ -1442,7 +1660,7 @@ async def hook_llm_response_v018(*args: Any, **kwargs: Any) -> None:
 
 
 @filter.command("topicweave", alias={"话题织机"}, priority=MESSAGE_PRIORITY)
-async def command_topic_v017(*args: Any, **kwargs: Any):
+async def command_topic_v090(*args: Any, **kwargs: Any):
     """查看/管理当前会话的话题状态。
 
     指令名为什么不是 `topic`：`topic` 太通用，AstrBot 的「检测到指令冲突」会把它和
@@ -1467,7 +1685,7 @@ async def command_topic_v017(*args: Any, **kwargs: Any):
 
 
 @filter.on_astrbot_loaded()
-async def on_loaded_v017(*args: Any, **kwargs: Any) -> None:
+async def on_loaded_v090(*args: Any, **kwargs: Any) -> None:
     """启动后把可用的模型 ID 打进日志，方便填 provider_id。
 
     签名不带任何必填参数：实机上是 `await handler.handler()` 直接调用的（连 self 都

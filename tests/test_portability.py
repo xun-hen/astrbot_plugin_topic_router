@@ -423,7 +423,7 @@ async def drive_message(*args, **kwargs) -> None:
         *args: 传给 handler 的参数。
         **kwargs: 传给 handler 的关键字参数。
     """
-    async for _ in MOD.handle_message_v017(*args, **kwargs):
+    async for _ in MOD.handle_message_v090(*args, **kwargs):
         pass
 
 
@@ -464,10 +464,10 @@ async def main() -> int:
         )
 
         names = (
-            "handle_message_v017",
-            "hook_llm_request_v017",
-            "command_topic_v017",
-            "on_loaded_v017",
+            "handle_message_v090",
+            "hook_llm_request_v090",
+            "command_topic_v090",
+            "on_loaded_v090",
         )
         for name in names:
             func = getattr(MOD, name, None)
@@ -477,7 +477,7 @@ async def main() -> int:
         reset_runtime()
         print("\n[2] 标准 AstrBot 契约：handler 是模块级函数，AstrBot 用绑定好的实例调用")
         ctx = FakeContext()
-        MOD.TopicRouterPlugin(ctx, {"mode": "mark"})
+        MOD.TopicRouterPlugin(ctx, {"mode": "mark", "aggregation": {"enabled": False}})
         event = FakeEvent("第一句话")
         # 注意：handler 故意不是类方法（见 router.py 文件头），所以两种契约下都是
         # 调这个模块级函数；"实例调用"在源码里等价于 plugin.__class__.handle_xxx。
@@ -486,36 +486,36 @@ async def main() -> int:
         check("调用后触发了判定", state.turns == 1, f"turns={state.turns}")
 
         req = ProviderRequest(prompt="第二句话")
-        await MOD.hook_llm_request_v017(event, req)
+        await MOD.hook_llm_request_v090(event, req)
         check("请求钩子调用不抛异常", True)
 
         reset_runtime()
         print("\n[3] 非标准契约：未绑定调用（第一个参数就是事件）")
         ctx2 = FakeContext()
-        MOD.TopicRouterPlugin(ctx2, {"mode": "mark"})
+        MOD.TopicRouterPlugin(ctx2, {"mode": "mark", "aggregation": {"enabled": False}})
         event2 = FakeEvent("未绑定调用", "stub:group:2")
         await drive_message(event2)
         state2 = MOD.RUNTIME.store.get(event2.unified_msg_origin)
         check("未绑定调用也能判定", state2.turns == 1, f"turns={state2.turns}")
 
         req2 = ProviderRequest(prompt="未绑定调用")
-        await MOD.hook_llm_request_v017(event2, req2)
+        await MOD.hook_llm_request_v090(event2, req2)
         check("未绑定调用请求钩子不抛异常", True)
 
         reset_runtime()
         print("\n[4] 零参数调用（on_astrbot_loaded 的真实形态）")
         ctx3 = FakeContext()
-        MOD.TopicRouterPlugin(ctx3, {"mode": "mark"})
+        MOD.TopicRouterPlugin(ctx3, {"mode": "mark", "aggregation": {"enabled": False}})
         try:
-            await MOD.on_loaded_v017()
-            check("on_loaded_v017() 零参数不抛异常", True)
+            await MOD.on_loaded_v090()
+            check("on_loaded_v090() 零参数不抛异常", True)
         except Exception as exc:  # noqa: BLE001
-            check("on_loaded_v017() 零参数不抛异常", False, f"{type(exc).__name__}: {exc}")
+            check("on_loaded_v090() 零参数不抛异常", False, f"{type(exc).__name__}: {exc}")
 
         reset_runtime()
         print("\n[5] 只有请求、没有事件（实机日志里的形态）")
         try:
-            await MOD.hook_llm_request_v017(ProviderRequest(prompt="只有请求"))
+            await MOD.hook_llm_request_v090(ProviderRequest(prompt="只有请求"))
             check("只有请求时不抛异常", True)
         except Exception as exc:  # noqa: BLE001
             check("只有请求时不抛异常", False, f"{type(exc).__name__}: {exc}")
@@ -523,11 +523,11 @@ async def main() -> int:
         reset_runtime()
         print("\n[6] 指令在两种契约下都能回话")
         ctx4 = FakeContext()
-        MOD.TopicRouterPlugin(ctx4, {"mode": "mark"})
+        MOD.TopicRouterPlugin(ctx4, {"mode": "mark", "aggregation": {"enabled": False}})
         event4 = FakeEvent("/topicweave", "stub:group:4")
-        outs = [r async for r in MOD.command_topic_v017(event4)]
+        outs = [r async for r in MOD.command_topic_v090(event4)]
         check("指令有回复", len(outs) == 1 and "当前话题状态" in outs[0].text)
-        outs2 = [r async for r in MOD.command_topic_v017(event4)]
+        outs2 = [r async for r in MOD.command_topic_v090(event4)]
         check("重复调用仍然稳定", len(outs2) == 1 and "当前话题状态" in outs2[0].text)
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
