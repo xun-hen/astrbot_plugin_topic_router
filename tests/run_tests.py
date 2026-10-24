@@ -1954,12 +1954,20 @@ async def test_aggregation_integration(module) -> None:
     service2 = MODULE.RUNTIME.aggregation
     check("抢占场景下聚合服务仍在", service2 is not None)
     if service2 is not None:
+        class _DispatchEntry:
+            """模拟 waking_check 写入的 activated_handlers 条目。"""
+
+            handler_name = "handle_message_v090"
+            extras_configs = {"priority": 1000}
+
         stolen = FakeEvent(
             "被更高优先级插件截走的消息",
             "aiocqhttp:FriendMessage:preempted",
             message_id="pre1",
             timestamp=4,
         )
+        # 关键：事件必须真的在派发计划里含本插件，才算"被抢占"。
+        stolen.set_extra("activated_handlers", [_DispatchEntry()])
         # 不调用消息入口，直接走请求钩子：模拟"入口在派发循环里没被调用"
         await MODULE.hook_llm_request_v090(
             stolen,
@@ -1973,6 +1981,24 @@ async def test_aggregation_integration(module) -> None:
             "抢占计数被记录",
             service2.stats.preempted_total == 1,
             str(getattr(service2.stats, "preempted_total", "?")),
+        )
+
+        # 合成事件（主动回复 / 其它插件直接 request_llm）没有派发计划，
+        # 不能报成"被抢占"——这正是 v0.9.0 线上误报的来源。
+        synthetic = FakeEvent(
+            "主动回复触发的合成请求",
+            "aiocqhttp:FriendMessage:synthetic",
+            message_id="syn1",
+            timestamp=5,
+        )
+        await MODULE.hook_llm_request_v090(
+            synthetic,
+            ProviderRequest(prompt="用户最新消息：主动回复触发的合成请求\n请输出判定 JSON。"),
+        )
+        check(
+            "合成事件不计入抢占",
+            service2.stats.preempted_total == 1,
+            str(service2.stats.preempted_total),
         )
         trace_path = (
             root2

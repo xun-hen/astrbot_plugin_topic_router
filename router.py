@@ -187,6 +187,13 @@ DETECTED_ATTR = "_topic_router_detected_v090"
 否则一次模型超时会变成两次（事件路 + 钩子路），把延迟翻倍。
 """
 
+MESSAGE_HANDLER_NAME = "handle_message_v090"
+"""消息入口的注册名。
+
+抢占检测要靠它在 `activated_handlers` 里核对"这次到底有没有派发到我们"。
+合成事件（主动回复、其它插件直接 `request_llm`）不在派发计划里，不能算抢占。
+"""
+
 
 
 def _hook_user_message(event: Any, req: Any) -> str:
@@ -604,6 +611,7 @@ def _init_aggregation(ctx: Context | None) -> None:
             raw,
             data_dir=_plugin_data_dir(),
             seen_attr=SEEN_ATTR,
+            message_handler_name=MESSAGE_HANDLER_NAME,
         )
         service.on_settled = _on_aggregated
         RUNTIME.aggregation = service

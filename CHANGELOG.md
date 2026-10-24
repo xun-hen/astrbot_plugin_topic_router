@@ -1,5 +1,60 @@
 # 更新日志
 
+## v0.9.1
+
+**修正抢占误报：合成事件不再被当成"被更高优先级插件截走"。**
+
+### 一、线上现象
+
+v0.9.0 在真机上出现过一条 `aggregate.preempted`：
+
+```
+aggregate.preempted umo=default:FriendMessage:... priority=1000
+```
+
+但同一条消息的统计里 `preempted_total` 可能为 0（插件重载后内存清零），
+且没有任何 `aggregate.start` 记录——说明这条 LLM 请求根本不是一次新的
+消息派发。
+
+### 二、根因
+
+`OnLLMRequestEvent` 钩子不只在新消息到达时触发，以下场景同样会触发：
+
+- 主动回复 / 主动聊天（`provider_ltm_settings.active_reply`）；
+- 其它插件直接调用 `event.request_llm()`；
+- Agent 内部重放、会话等待器把事件复制后重新入队。
+
+这些事件的 `SEEN_ATTR` 当然不存在，但 `check_preempted()` 只看了
+"消息有内容 + 没有标记"，于是把正常行为报成了抢占。
+
+### 三、修法
+
+抢占的**必要条件**改成：这条事件真的在本次派发计划里，且计划中包含本插件的
+消息 handler。`waking_check` 会在派发前把 `activated_handlers` 写进事件
+（已按优先级降序、已按会话插件过滤），所以：
+
+1. `activated_handlers` 缺失（合成事件）→ 不报抢占；
+2. 列表里没有 `handle_message_v090`（本就不该派发给我们）→ 不报抢占；
+3. 列表里有、但我们没执行（`SEEN_ATTR` 缺失）→ 才报抢占。
+
+告警同时带上直接证据，下一次不用再猜：
+
+```
+aggregate.preempted ... dispatched=7 position=3
+  prior=handle_session_control_agent@9223372036854775807
+  msg_id=...
+```
+
+- `position`：本插件在派发计划里的下标；
+- `prior`：紧挨在本插件前面的最多 3 个 handler 及其优先级；
+- `dispatched`：本次派发计划里的 handler 总数。
+
+### 四、测试
+
+- 抢占用例显式构造 `activated_handlers`，覆盖真实派发计划；
+- 新增"合成事件不计数"用例；
+- `tests/run_tests.py`：**207 项**，其余既有用例不变。
+
 ## v0.9.0
 
 **把「消息聚合」（`astrbot_plugin_msg_aggregator`）内建为判定流水线的第一阶段。**

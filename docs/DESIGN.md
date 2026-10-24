@@ -290,6 +290,14 @@ LLM 请求钩子（hook_llm_request_v090）
 3. **失败可见**：入口被更高优先级者挤掉时，钩子仍能判定并写 `aggregate.preempted`，
    `preempted_total` 计入统计——从"静默不工作"降级为"可见降级"。
 
+> **v0.9.1 修正（抢占误报）**：`on_llm_request` 也会被合成事件触发（主动回复、
+> 其它插件直接 `request_llm`、Agent 重放、会话等待器复制入队）。这些事件没有
+> `SEEN_ATTR`，但它们**本来就不在派发计划里**，不能算"被抢占"。
+> 现在的必要条件是从 `event.get_extra("activated_handlers")` 取本次派发计划：
+> 列表缺失或列表里没有 `handle_message_v090` → 不报抢占；列表里有、但入口没跑
+> （`SEEN_ATTR` 缺失）→ 才报。告警同时带 `dispatched` / `position` / `prior`
+> （紧挨在前面的最多 3 个 handler 及优先级），下一次不用再猜是谁挡的。
+
 ### 4.1 为什么保留请求钩子（历史依据）
 
 AstrBot 的消息处理器循环（`core/pipeline/process_stage/method/star_request.py`）：

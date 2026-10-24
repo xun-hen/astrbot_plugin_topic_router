@@ -676,7 +676,7 @@ python tests/eval_topic_detection.py --json-out before.json
 五套离线测试，都不需要启动 AstrBot（第一、四、五套需要 AstrBot 的 Python 环境来 import 真实代码）：
 
 ```bash
-# 1) 插件逻辑：206 项（含跨路去重、钩子两种形态、调试模式、长空闲、落盘取证、聚合整合；需要 AstrBot 的 python）
+# 1) 插件逻辑：207 项（含跨路去重、钩子两种形态、调试模式、长空闲、落盘取证、聚合整合；需要 AstrBot 的 python）
 python tests/run_tests.py
 
 # 2) 可移植性：16 项（用桩模块，任意 Python 3.10+）

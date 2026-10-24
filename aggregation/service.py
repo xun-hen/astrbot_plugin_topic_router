@@ -78,6 +78,7 @@ class AggregationService:
         *,
         data_dir: Path,
         seen_attr: str = SEEN_ATTR,
+        message_handler_name: str = "handle_message_v090",
         clock: Any = None,
     ) -> None:
         """初始化。
@@ -87,12 +88,15 @@ class AggregationService:
             config: 聚合配置字典（`config.aggregation` 子项）。
             data_dir: 插件数据目录（统计、附件缓存都放这里）。
             seen_attr: 事件上的"入口执行过"标记名。
+            message_handler_name: 消息 handler 的函数名，用于核对该事件是否
+                真的被派发到了本插件（抢占检测的必要条件）。
             clock: 注入的时间源（测试用 FakeClock）。
         """
         self.context = context
         self.cfg: Config = load_config(config)
         self.clock = clock or RealClock()
         self.seen_attr = seen_attr
+        self.message_handler_name = message_handler_name
         self.on_settled: OnSettled | None = None
         """合并并重构事件成功后的回调（话题判定挂在这里）。
 
@@ -647,8 +651,38 @@ class AggregationService:
             self.store.abort(rnd, cause="exception")
             self._silence(event, cause="failed")
 
+    def _dispatch_snapshot(self, event: Any) -> tuple[list[Any], str]:
+        """取"这次派发计划里有哪些 handler"以及本插件在其中的位置。
+
+        这是抢占检测从"猜"变成"可证"的关键：`activated_handlers` 由
+        `waking_check` 在派发前写入事件，里面是**这次真的会被调用的** handler
+        （已按优先级降序）。如果我们的 handler 不在里面，说明这条事件根本没
+        被派发给我们（例如其它插件直接 `request_llm()` 的合成事件），不能叫
+        "被抢占"——那正是 v0.9.0 误报的来源。
+
+        Args:
+            event: 消息事件。
+
+        Returns:
+            `(handlers, self_index)`；`self_index` 为 -1 表示不在派发计划里。
+        """
+        try:
+            handlers = list(event.get_extra("activated_handlers") or [])
+        except Exception:  # noqa: BLE001
+            return [], -1
+        names = [str(getattr(h, "handler_name", "") or "") for h in handlers]
+        try:
+            index = names.index(self.message_handler_name)
+        except ValueError:
+            index = -1
+        return handlers, index
+
     def _should_have_handled(self, event: Any) -> bool:
         """判断"这条消息本来该由聚合阶段处理"（抢占检测用，刻意保守）。
+
+        必要条件：本插件的消息 handler **在这次的 `activated_handlers` 里**。
+        合成事件（别的插件直接 `request_llm`、主动回复、Agent 重放）没有这份
+        派发计划，或计划里没有我们，不能计为抢占——否则会把正常行为报成故障。
 
         Args:
             event: 消息事件。
@@ -656,6 +690,9 @@ class AggregationService:
         Returns:
             True 表示如果没被抢占，本阶段本应处理它。
         """
+        _handlers, index = self._dispatch_snapshot(event)
+        if index < 0:
+            return False
         if caps_mod.is_typing_notice(event) or caps_mod.is_recall_notice(event):
             return False
         if not self._accepts(event):
@@ -672,7 +709,8 @@ class AggregationService:
         """抢占检测：本该处理却没处理到，说明被更高优先级者挤掉了。
 
         **不做任何补救动作**（补救会和对方抢，反而更乱），只告警与计数，
-        让"优先级不足"从静默故障变成可观测现象。
+        让"优先级不足"从静默故障变成可观测现象。告警里带**排在我们前面的
+        handler 名单与优先级**，下一次不必再猜是谁挡的。
 
         Args:
             event: 消息事件。
@@ -684,6 +722,13 @@ class AggregationService:
             return False
         if not self._should_have_handled(event):
             return False
+        handlers, index = self._dispatch_snapshot(event)
+        prior = []
+        for handler in handlers[:index][-3:]:
+            priority = (getattr(handler, "extras_configs", None) or {}).get(
+                "priority", "?"
+            )
+            prior.append(f"{getattr(handler, 'handler_name', '?')}@{priority}")
         try:
             setattr(event, self.seen_attr, True)
         except Exception:  # noqa: BLE001
@@ -693,10 +738,15 @@ class AggregationService:
             "aggregate.preempted",
             umo=event_io.umo_of(event),
             priority=MESSAGE_PRIORITY,
+            dispatched=len(handlers),
+            position=index,
+            msg_id=getattr(getattr(event, "message_obj", None), "message_id", "?"),
+            prior=",".join(prior) or "(none)",
             hint=(
-                "本条消息未进入聚合：有执行者在消息入口之前静默了事件"
-                "（通常是 priority 更高，或框架内置的会话控制 handler）。"
-                "本插件已取插件层顶格 1000，可查插件列表里优先级更高的执行者"
+                "本条消息未进入聚合：派发计划里有本插件，但入口没被执行"
+                "（通常是排在前面的 handler 静默了事件）。"
+                "prior= 是紧挨在本插件前面的执行者；若 position=0 仍被跳过，"
+                "说明事件在派发循环之外被消费"
             ),
         )
         return True
