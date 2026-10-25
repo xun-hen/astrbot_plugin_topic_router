@@ -1,4 +1,4 @@
-﻿name: astrbot_plugin_topic_router_pro
+name: astrbot_plugin_topic_router_pro
 display_name: 话题路由器PRO
 short_desc: 先合并连发消息，再判断这是接着上一个话题还是开了新话题
 desc: |-
