@@ -1,4 +1,4 @@
-﻿"""离线测试：不启动 AstrBot，用假 context/event 跑通判定与动作层。
+"""离线测试：不启动 AstrBot，用假 context/event 跑通判定与动作层。
 
 跑法（需要用 AstrBot 自带的 Python 运行时，才能 import 到真实的 astrbot 模块）：
 

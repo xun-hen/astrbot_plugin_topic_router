@@ -1,4 +1,4 @@
-"""每日复盘：把当天的话题判定流水整理成一份可读报告（v0.10.0）。
+"""每日复盘：把当天的话题判定流水整理成一份可读报告（v1.0.0）。
 
 用户要的是"每天自动用模型整理数据"：判定本身在 mark 阶段只记日志，人很难从
 info.log 里看出"这几天判得准不准"。所以这里做三件事：
@@ -334,3 +334,4 @@ def compose_review(stats: dict[str, Any], model_text: str) -> str:
     if not body:
         return fallback_text(stats)
     return "\n".join(head) + "\n\n## 模型复盘\n\n" + body + "\n"
+
