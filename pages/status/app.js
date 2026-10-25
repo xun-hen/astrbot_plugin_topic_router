@@ -288,99 +288,131 @@ function renderReview(report) {
 }
 
 // ---------------------------------------------------------------- 全部设置
-// 表单是照着 /schema 生成的：新增配置项只要改 _conf_schema.json，页面自动出现控件。
+// 表单照着 /schema 生成：新增配置项只要改 _conf_schema.json，页面自动出现控件。
 let settingsSchema = null;
+
+const GROUP_ORDER = ["promotion", "review", "aggregation"];
+const GROUP_COLLAPSED = new Set(["aggregation"]);
 
 function fieldLabel(key, spec) {
   return (spec && spec.description) || key.split(".").pop();
 }
 
-function buildField(key, spec, value) {
+function makeInput(key, spec, value) {
   const kind = (spec && spec.type) || "string";
-  const wrap = document.createElement("label");
-  wrap.className = "field";
   let input;
   if (kind === "bool") {
     input = document.createElement("input");
     input.type = "checkbox";
     input.checked = !!value;
-    wrap.appendChild(input);
-    const text = document.createElement("span");
-    text.textContent = fieldLabel(key, spec);
-    wrap.appendChild(text);
   } else if (kind === "int" || kind === "float") {
     input = document.createElement("input");
     input.type = "number";
     input.step = kind === "float" ? "0.1" : "1";
     input.value = value ?? (spec && spec.default) ?? 0;
-    const text = document.createElement("span");
-    text.textContent = fieldLabel(key, spec);
-    wrap.appendChild(text);
-    wrap.appendChild(input);
   } else if (Array.isArray(spec && spec.options) && spec.options.length) {
     input = document.createElement("select");
     for (const opt of spec.options) {
-      const o = document.createElement("option");
-      o.value = opt;
-      o.textContent = opt;
-      input.appendChild(o);
+      const option = document.createElement("option");
+      option.value = opt;
+      option.textContent = opt;
+      input.appendChild(option);
     }
     input.value = value ?? (spec && spec.default) ?? spec.options[0];
-    const text = document.createElement("span");
-    text.textContent = fieldLabel(key, spec);
-    wrap.appendChild(text);
-    wrap.appendChild(input);
   } else if (kind === "list" || kind === "array") {
     input = document.createElement("input");
     input.type = "text";
-    input.value = Array.isArray(value) ? value.join(",") : (value ?? "");
-    const text = document.createElement("span");
-    text.textContent = fieldLabel(key, spec);
-    wrap.appendChild(text);
-    wrap.appendChild(input);
+    input.value = Array.isArray(value) ? value.join(", ") : (value ?? "");
+    input.placeholder = "多个值用逗号分隔";
   } else {
     input = document.createElement("input");
     input.type = "text";
     input.value = value ?? "";
-    const text = document.createElement("span");
-    text.textContent = fieldLabel(key, spec);
-    wrap.appendChild(text);
-    wrap.appendChild(input);
   }
   input.dataset.key = key;
   input.dataset.kind = kind;
+  input.className = "field-input";
+  return input;
+}
+
+function buildField(key, spec, value) {
+  const kind = (spec && spec.type) || "string";
+  const wrap = document.createElement("label");
+  wrap.className = kind === "bool" ? "field field-check" : "field";
+  const label = document.createElement("span");
+  label.className = "field-label";
+  label.textContent = fieldLabel(key, spec);
+  const input = makeInput(key, spec, value);
+  if (kind === "bool") {
+    wrap.append(input, label);
+  } else {
+    wrap.append(label, input);
+  }
   if (spec && spec.hint) wrap.title = spec.hint;
   return wrap;
+}
+
+function renderGroup(key, spec, config) {
+  const details = document.createElement("details");
+  details.className = "settings-group";
+  details.open = !GROUP_COLLAPSED.has(key);
+  const items = spec.items || {};
+  const summary = document.createElement("summary");
+  const title = document.createElement("span");
+  title.textContent = spec.description || key;
+  const count = document.createElement("span");
+  count.className = "group-count";
+  count.textContent = String(Object.keys(items).length);
+  summary.append(title, count);
+  details.appendChild(summary);
+
+  const body = document.createElement("div");
+  body.className = "fields";
+  const groupValue = (config && config[key]) || {};
+  for (const [sub, subSpec] of Object.entries(items)) {
+    if (!subSpec || typeof subSpec !== "object") continue;
+    const value = groupValue[sub] !== undefined ? groupValue[sub] : subSpec.default;
+    body.appendChild(buildField(`${key}.${sub}`, subSpec, value));
+  }
+  details.appendChild(body);
+  return details;
 }
 
 function renderSettingsForm(schema, config) {
   const host = el.settings.form;
   host.textContent = "";
   if (!schema) {
-    host.textContent = "读不到配置 schema（页面需要 v1.1.0 及以上版本）";
+    host.textContent = "读不到配置 schema（需要 v1.1.0 及以上版本）";
     return;
   }
+
+  const basic = document.createElement("div");
+  basic.className = "fields";
+  const groups = [];
   for (const [key, spec] of Object.entries(schema)) {
     if (!spec || typeof spec !== "object") continue;
     if (spec.type === "object") {
-      const details = document.createElement("details");
-      details.open = key === "promotion";
-      const summary = document.createElement("summary");
-      summary.textContent = spec.description || key;
-      details.appendChild(summary);
-      const body = document.createElement("div");
-      body.className = "fields";
-      const groupValue = (config && config[key]) || {};
-      for (const [sub, subSpec] of Object.entries(spec.items || {})) {
-        const value = groupValue[sub] !== undefined ? groupValue[sub] : subSpec && subSpec.default;
-        body.appendChild(buildField(`${key}.${sub}`, subSpec, value));
-      }
-      details.appendChild(body);
-      host.appendChild(details);
-    } else {
-      const value = config && config[key] !== undefined ? config[key] : spec.default;
-      host.appendChild(buildField(key, spec, value));
+      groups.push([key, spec]);
+      continue;
     }
+    const value = config && config[key] !== undefined ? config[key] : spec.default;
+    basic.appendChild(buildField(key, spec, value));
+  }
+
+  if (basic.childElementCount) {
+    const head = document.createElement("div");
+    head.className = "group-title";
+    head.textContent = "基础";
+    host.append(head, basic);
+  }
+
+  groups.sort((a, b) => {
+    const ia = GROUP_ORDER.indexOf(a[0]);
+    const ib = GROUP_ORDER.indexOf(b[0]);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  for (const [key, spec] of groups) {
+    host.appendChild(renderGroup(key, spec, config));
   }
 }
 

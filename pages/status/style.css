@@ -1,4 +1,4 @@
-/* 零依赖：不引入任何 CSS 框架与图标字体。主题走 Dashboard 注入的 data-theme。 */
+/* 闆朵緷璧栵細涓嶅紩鍏ヤ换浣?CSS 妗嗘灦涓庡浘鏍囧瓧浣撱€備富棰樿蛋 Dashboard 娉ㄥ叆鐨?data-theme銆?*/
 
 :root {
   --bg: #ffffff;
@@ -176,49 +176,127 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); 
 }
 
 
-.fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem 1.2rem;
-  margin: 0.4rem 0 0.6rem;
-  font-size: 0.85rem;
-}
-.fields label {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-}
-.fields input[type='number'] {
-  width: 5.2rem;
-  padding: 0.15rem 0.3rem;
+
+.settings-form {
+  display: block;
+  margin-top: 0.2rem;
 }
 
-
-.settings-form details {
-  margin: 0.3rem 0;
-  border-top: 1px solid rgba(0, 0, 0, 0.06);
-  padding-top: 0.3rem;
-}
-.settings-form summary {
-  cursor: pointer;
+.settings-form .group-title {
+  margin: 0.9rem 0 0.3rem;
+  font-size: 0.86rem;
   font-weight: 600;
-  font-size: 0.88rem;
-  padding: 0.2rem 0;
-}
-.settings-form .field {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.82rem;
-  margin: 0.2rem 0;
-}
-.settings-form input[type='text'],
-.settings-form input[type='number'],
-.settings-form select {
-  padding: 0.12rem 0.3rem;
-  font-size: 0.82rem;
-}
-.settings-form input[type='text'] {
-  min-width: 12rem;
+  color: rgba(0, 0, 0, 0.75);
 }
 
+.settings-form .settings-group {
+  margin: 0.7rem 0 0;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  padding-top: 0.35rem;
+}
+
+.settings-form summary {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: pointer;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.8);
+  padding: 0.25rem 0;
+  list-style-position: inside;
+}
+
+.settings-form .group-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4rem;
+  height: 1.15rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: rgba(0, 0, 0, 0.55);
+}
+
+.settings-form .fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15.5rem, 1fr));
+  gap: 0.55rem 1.1rem;
+  padding: 0.45rem 0 0.3rem;
+}
+
+.settings-form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  min-width: 0;
+}
+
+.settings-form .field-label {
+  font-size: 0.78rem;
+  line-height: 1.3;
+  color: rgba(0, 0, 0, 0.6);
+}
+
+.settings-form .field-input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.22rem 0.4rem;
+  font-size: 0.82rem;
+  border: 1px solid rgba(0, 0, 0, 0.16);
+  border-radius: 4px;
+  background: #fff;
+  color: rgba(0, 0, 0, 0.85);
+}
+
+.settings-form input[type='number'].field-input {
+  max-width: 8rem;
+}
+
+.settings-form select.field-input {
+  max-width: 11rem;
+}
+
+.settings-form .field-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+  padding-top: 1.1rem;
+}
+
+.settings-form .field-check .field-label {
+  font-size: 0.82rem;
+  color: rgba(0, 0, 0, 0.78);
+}
+
+.settings-form .field-input:focus {
+  outline: none;
+  border-color: rgba(0, 0, 0, 0.45);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  .settings-form .field-input {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.18);
+    color: rgba(255, 255, 255, 0.9);
+  }
+  .settings-form .field-label,
+  .settings-form summary,
+  .settings-form .group-title {
+    color: rgba(255, 255, 255, 0.72);
+  }
+  .settings-form .group-count {
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.6);
+  }
+  .settings-form .field-check .field-label {
+    color: rgba(255, 255, 255, 0.86);
+  }
+  .settings-form .settings-group {
+    border-top-color: rgba(255, 255, 255, 0.12);
+  }
+}
