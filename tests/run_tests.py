@@ -1921,15 +1921,17 @@ async def test_aggregation_integration(module) -> None:
         )
 
     finished = _wait(12, "。")
-    unfinished = _wait(12, "")
-    short_unfinished = _wait(4, "")
+    # 用真实的"句末不是标点"的字符（不是空串）——v0.9.3 就是栽在只判空串上，
+    # 窗口在实机上仍然是 2.5s，扫间隔才发现。
+    unfinished = _wait(12, "略")
+    short_unfinished = _wait(4, "略")
     check(
-        "话没说完（无句末标点）比已说完的句子多等 ≥0.8s",
+        "话没说完（句末不是标点）比已说完的句子多等 ≥0.8s",
         unfinished >= finished + 0.8,
         f"unfinished={unfinished} finished={finished}",
     )
     check(
-        "短句且无句末标点的有效窗口约 3.5s",
+        "短句且句末不是标点的有效窗口约 3.5s",
         3.3 <= short_unfinished <= 3.7,
         str(short_unfinished),
     )
