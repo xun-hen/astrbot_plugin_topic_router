@@ -69,6 +69,7 @@ import asyncio
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -123,6 +124,15 @@ from .detection import (  # noqa: E402
     make_hint,
     parse_verdict,
 )
+from .daily import (  # noqa: E402
+    REVIEW_SYSTEM_PROMPT,
+    JudgmentLog,
+    ReviewStore,
+    build_prompt,
+    compose_review,
+    summarize,
+)
+from .journey import Journey, Plan  # noqa: E402
 from .state import TopicStore  # noqa: E402
 
 PLUGIN_NAME = "astrbot_plugin_topic_router_pro"
@@ -359,6 +369,18 @@ class _Runtime:
     """
     aggregation_error: str = ""
     """聚合初始化失败的原因（空串表示没有失败，或聚合被显式关闭）。"""
+
+    journey: Any = None
+    """阶梯放权状态机（`journey.Journey`），懒初始化。"""
+
+    review_log: Any = None
+    """判定流水（`daily.JudgmentLog`），每日复盘的数据源。"""
+
+    review_store: Any = None
+    """复盘报告存储（`daily.ReviewStore`）。"""
+
+    extras_tasks: list[Any] = []
+    """放权/复盘的后台任务（terminate 时取消）。"""
 
 
 RUNTIME = _Runtime()
@@ -755,6 +777,340 @@ def _persist_aggregation_preset(values: dict[str, Any]) -> None:
         save()
 
 
+# ------------------------------------------------------- 阶梯放权 / 每日复盘
+def _promotion_config() -> dict[str, Any]:
+    """取 `promotion` 子配置。
+
+    Returns:
+        配置字典（缺失或类型不对时为空字典）。
+    """
+    raw = RUNTIME.config.get("promotion")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _review_config() -> dict[str, Any]:
+    """取 `review` 子配置。
+
+    Returns:
+        配置字典（缺失或类型不对时为空字典）。
+    """
+    raw = RUNTIME.config.get("review")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _init_extras() -> None:
+    """初始化放权状态机与复盘存储（幂等）。
+
+    两者都只依赖 `plugin_data` 目录，不依赖聚合是否开启——所以即使
+    `aggregation.enabled=false`，阶梯放权与每日复盘也照常工作。
+    """
+    data_dir = _plugin_data_dir()
+    review_dir = data_dir / "review"
+    try:
+        if RUNTIME.journey is None:
+            RUNTIME.journey = Journey(data_dir / "promotion.json")
+        if RUNTIME.review_log is None:
+            RUNTIME.review_log = JudgmentLog(review_dir / "logs")
+        if RUNTIME.review_store is None:
+            RUNTIME.review_store = ReviewStore(review_dir)
+    except Exception as exc:  # noqa: BLE001 - 旁路功能，失败不能拖垮插件
+        logger.warning(f"[{PLUGIN_NAME}] 放权/复盘初始化失败（已忽略）：{exc}")
+
+
+def _set_mode(mode: str, reason: str = "") -> None:
+    """改模式并写回插件配置（自动放权与页面切档共用）。
+
+    Args:
+        mode: 目标模式。
+        reason: 日志里的原因。
+    """
+    before = _mode()
+    if before == mode:
+        return
+    RUNTIME.config["mode"] = mode
+    save = getattr(RUNTIME.config, "save_config", None)
+    if callable(save):
+        try:
+            save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{PLUGIN_NAME}] 写回 mode 失败（本次仍生效）：{exc}")
+    logger.info(
+        f"[{PLUGIN_NAME}] 模式已切换 {before} → {mode}"
+        + (f"（{reason}）" if reason else "")
+    )
+
+
+def _review_view() -> dict[str, Any] | None:
+    """页面/接口用的最新一份复盘。
+
+    Returns:
+        `{"day","text","path"}` 或 None。
+    """
+    if RUNTIME.review_store is None:
+        _init_extras()
+    store = RUNTIME.review_store
+    return store.latest() if store is not None else None
+
+
+def _promotion_view() -> dict[str, Any]:
+    """页面/接口用的放权进度。
+
+    Returns:
+        进度字典（状态机不可用时带 error 字段）。
+    """
+    if RUNTIME.journey is None:
+        _init_extras()
+    journey = RUNTIME.journey
+    if journey is None:
+        return {"enabled": False, "error": "放权状态机不可用"}
+    plan = Plan.from_config(_promotion_config())
+    return journey.stage_view(time.time(), plan, _mode())
+
+
+async def _promotion_reset() -> dict[str, Any]:
+    """重置放权计时（从当前模式重新开始数天数）。
+
+    Returns:
+        重置后的进度视图。
+    """
+    _init_extras()
+    if RUNTIME.journey is not None:
+        RUNTIME.journey.start(time.time(), _mode())
+        logger.info(f"[{PLUGIN_NAME}] 阶梯放权已重置，从 {_mode()} 重新计时")
+    return _promotion_view()
+
+
+def _apply_promotion(now: float | None = None) -> str | None:
+    """按放权计划推进一步；返回新写入的 mode（None 表示不动）。
+
+    Args:
+        now: 时间戳（测试可注入）。
+
+    Returns:
+        新 mode 或 None。
+    """
+    if RUNTIME.journey is None:
+        return None
+    now = now if now is not None else time.time()
+    plan = Plan.from_config(_promotion_config())
+    try:
+        target = RUNTIME.journey.step(now, plan, _mode())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[{PLUGIN_NAME}] 放权推进失败（已忽略）：{exc}")
+        return None
+    if target is None:
+        return None
+    _set_mode(target, reason=f"阶梯放权：第 {RUNTIME.journey.elapsed_days(now):.1f} 天")
+    return target
+
+
+def _record_judgment(
+    umo: str,
+    message: str,
+    verdict: Any,
+    *,
+    via_hook: bool,
+) -> None:
+    """把一条判定写进每日流水（供复盘使用）。
+
+    Args:
+        umo: 会话标识。
+        message: 用户消息。
+        verdict: 判定结果。
+        via_hook: 是否走请求钩子那条路。
+    """
+    log = RUNTIME.review_log
+    if log is None:
+        return
+    try:
+        log.append(
+            {
+                "ts": time.time(),
+                "umo": umo,
+                "text": (message or "")[:120],
+                "verdict": "new" if getattr(verdict, "is_new_topic", False) else "continue",
+                "confidence": round(float(getattr(verdict, "confidence", 0.0) or 0.0), 3),
+                "source": str(getattr(verdict, "source", "") or ""),
+                "mode": _mode(),
+                "via": "hook" if via_hook else "event",
+                "topic": str(getattr(verdict, "topic_label", "") or "")[:60],
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - 复盘是旁路
+        logger.debug(f"[{PLUGIN_NAME}] 写判定流水失败（已忽略）：{exc}")
+
+
+async def _review_provider(ctx: Context | None, umo_hint: str) -> str:
+    """给每日复盘挑一个可用模型。
+
+    优先级：`review.provider_id` → 顶层 `provider_id` → 当天最活跃会话的当前模型
+    → provider 列表里的第一个。
+
+    Args:
+        ctx: 插件上下文。
+        umo_hint: 当天最活跃的会话（用来解析"跟随会话"的模型）。
+
+    Returns:
+        provider id；空串表示没有可用模型。
+    """
+    for key in ("provider_id",):
+        want = str(_review_config().get(key) or "").strip()
+        if want:
+            exists = await _provider_exists(ctx, want)
+            if exists is not False:
+                return want
+    want = str(RUNTIME.config.get("provider_id", "") or "").strip()
+    if want:
+        exists = await _provider_exists(ctx, want)
+        if exists is not False:
+            return want
+    getter = getattr(ctx, "get_current_chat_provider_id", None)
+    if getter is not None and umo_hint:
+        try:
+            pid = await getter(umo=umo_hint)
+            if pid:
+                return str(pid)
+        except Exception:  # noqa: BLE001
+            pass
+    ids = _list_provider_ids(ctx)
+    return ids[0] if ids else ""
+
+
+async def _run_review(now: float | None = None, *, force: bool = False) -> dict[str, Any] | None:
+    """生成当天复盘报告（模型不可用时退回本地摘要）。
+
+    Args:
+        now: 时间戳（测试可注入）。
+        force: 忽略"auto 模式跳过"的限制（页面手动触发时用）。
+
+    Returns:
+        报告字典 `{"day", "text", "path"}`；跳过时返回 None。
+    """
+    cfg = _review_config()
+    enabled = cfg.get("enabled", False)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled and not force:
+        return None
+    if not force and _mode() == MODE_AUTO and bool(cfg.get("only_before_auto", True)):
+        logger.info(f"[{PLUGIN_NAME}] 已进入 auto，跳过每日复盘（only_before_auto）")
+        return None
+    _init_extras()
+    store, log = RUNTIME.review_store, RUNTIME.review_log
+    if store is None or log is None:
+        return None
+
+    now = now if now is not None else time.time()
+    day = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+    records = log.read_day(day)
+    stats = summarize(records, day)
+
+    model_text = ""
+    umo_hint = ""
+    if records:
+        counts: dict[str, int] = {}
+        for rec in records:
+            umo = str(rec.get("umo") or "")
+            if umo:
+                counts[umo] = counts.get(umo, 0) + 1
+        umo_hint = max(counts, key=counts.get) if counts else ""
+    if records and _ctx() is not None:
+        try:
+            provider_id = await _review_provider(_ctx(), umo_hint)
+            generate = getattr(_ctx(), "llm_generate", None)
+            if provider_id and generate is not None:
+                resp = await asyncio.wait_for(
+                    generate(
+                        chat_provider_id=provider_id,
+                        prompt=build_prompt(stats),
+                        system_prompt=REVIEW_SYSTEM_PROMPT,
+                    ),
+                    timeout=60,
+                )
+                model_text = str(getattr(resp, "completion_text", "") or "")
+        except Exception as exc:  # noqa: BLE001 - 复盘失败退回本地摘要
+            logger.warning(f"[{PLUGIN_NAME}] 每日复盘模型调用失败，退回本地摘要：{exc}")
+
+    report = compose_review(stats, model_text)
+    path = store.save(day, report)
+    try:
+        log.prune(now)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info(
+        f"[{PLUGIN_NAME}] 每日复盘已生成 {day}：判定 {stats['total']} 次、"
+        f"新话题 {stats['new_topic']} 次、模型={'是' if model_text else '否'} → {path}"
+    )
+    return {"day": day, "text": report, "path": str(path), "stats": stats}
+
+
+async def _promotion_loop() -> None:
+    """后台推进阶梯放权（每 30 分钟一次，足够按天生效）。"""
+    while True:
+        try:
+            await asyncio.sleep(1800)
+            _apply_promotion()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{PLUGIN_NAME}] 放权循环异常（已忽略）：{exc}")
+
+
+async def _review_loop() -> None:
+    """后台检查"今天的复盘该不该生成"（每 10 分钟一次，幂等）。"""
+    while True:
+        try:
+            await asyncio.sleep(600)
+            cfg = _review_config()
+            enabled = cfg.get("enabled", False)
+            if isinstance(enabled, str):
+                enabled = enabled.strip().lower() in {"1", "true", "yes", "on"}
+            if not enabled:
+                continue
+            try:
+                hour = int(cfg.get("hour", 23) or 23)
+            except (TypeError, ValueError):
+                hour = 23
+            hour = max(0, min(23, hour))
+            now = time.time()
+            if datetime.fromtimestamp(now).hour < hour:
+                continue
+            day = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+            target = Path(RUNTIME.review_store.directory) / f"{day}.md" if RUNTIME.review_store else None
+            if target is not None and target.exists():
+                continue
+            await _run_review(now)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{PLUGIN_NAME}] 复盘循环异常（已忽略）：{exc}")
+
+
+def _start_extras_tasks() -> None:
+    """启动放权/复盘的后台任务（幂等）。"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.debug(f"[{PLUGIN_NAME}] 没有运行中的事件循环，放权/复盘任务延后启动")
+        return
+    if not RUNTIME.extras_tasks:
+        RUNTIME.extras_tasks.append(loop.create_task(_promotion_loop()))
+        RUNTIME.extras_tasks.append(loop.create_task(_review_loop()))
+
+
+async def _stop_extras_tasks() -> None:
+    """停止后台任务。"""
+    tasks = list(RUNTIME.extras_tasks)
+    RUNTIME.extras_tasks.clear()
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+
+
 def _init_aggregation(ctx: Context | None) -> None:
     """按配置创建内建聚合服务（关闭时什么都不做）。
 
@@ -792,6 +1148,14 @@ def _init_aggregation(ctx: Context | None) -> None:
             persist_preset=_persist_aggregation_preset,
         )
         service.on_settled = _on_aggregated
+        # 页面后端在聚合服务里；放权/复盘的只读视图与手动触发挂在这里，
+        # 避免 web_api 反向 import router（会循环）。
+        service.extras = {
+            "promotion": _promotion_view,
+            "promotion_reset": _promotion_reset,
+            "review": _review_view,
+            "run_review": lambda: _run_review(force=True),
+        }
         RUNTIME.aggregation = service
         RUNTIME.aggregation_error = ""
     except Exception as exc:  # noqa: BLE001 - 聚合不可用不能拖垮判定
@@ -1309,6 +1673,7 @@ async def _detect(
 
     verdict = _apply_threshold(verdict)
     _log_verdict(umo, message, verdict, state)
+    _record_judgment(umo, message, verdict, via_hook=via_hook)
     _trace(
         "VERDICT",
         umo,
@@ -1563,6 +1928,10 @@ class TopicRouterPlugin(Star):
         RUNTIME.pending_actions = {}
         RUNTIME.aggregation = None
         RUNTIME.aggregation_error = ""
+        RUNTIME.extras_tasks = []
+
+        # 阶梯放权 / 每日复盘：与聚合无关，单独初始化
+        _init_extras()
 
         # 内建消息聚合：默认开启，初始化失败自动退化为逐条判定
         _init_aggregation(context)
@@ -1580,6 +1949,14 @@ class TopicRouterPlugin(Star):
         所以这里必须是协程；`service.initialize()` 本身是同步的（注册路由 + 建后台任务），
         不需要再套一层 await。
         """
+        # 阶梯放权 / 每日复盘：不依赖聚合，先启动
+        _init_extras()
+        try:
+            _apply_promotion()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{PLUGIN_NAME}] 启动时推进放权失败（已忽略）：{exc}")
+        _start_extras_tasks()
+
         service = RUNTIME.aggregation
         if service is None:
             if RUNTIME.aggregation_error:
@@ -1597,6 +1974,7 @@ class TopicRouterPlugin(Star):
 
     async def terminate(self) -> None:
         """插件卸载/停用时保存状态，并优雅关停聚合。"""
+        await _stop_extras_tasks()
         service = RUNTIME.aggregation
         if service is not None:
             try:

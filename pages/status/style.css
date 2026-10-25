@@ -164,3 +164,14 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); 
   font-size: 12.5px;
   background: color-mix(in srgb, var(--warn) 8%, transparent);
 }
+
+.review {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  max-height: 22rem;
+  overflow: auto;
+  margin: 0;
+}
+

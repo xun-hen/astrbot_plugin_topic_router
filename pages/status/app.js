@@ -20,6 +20,8 @@ const el = {
   hist: $("hist"), p50: $("p50"), p95: $("p95"), lsample: $("lsample"),
   rounds: $("rounds"), roundsCount: $("rounds-count"), roundsEmpty: $("rounds-empty"),
   history: $("history"), historyEmpty: $("history-empty"),
+  journey: { stage: $("journey-stage"), line: $("journey-line"), reset: $("journey-reset") },
+  review: { day: $("review-day"), text: $("review-text") },
 };
 
 let subscriptionId = null;
@@ -227,20 +229,68 @@ function renderActive(count) {
 async function loadAll() {
   if (!bridge) return;
   try {
-    const [stats, rounds, history, preset] = await Promise.all([
+    const [stats, rounds, history, preset, promotion, review] = await Promise.all([
       bridge.apiGet("stats"),
       bridge.apiGet("rounds"),
       bridge.apiGet("history", { limit: HISTORY_LIMIT }),
       bridge.apiGet("preset"),
+      bridge.apiGet("promotion"),
+      bridge.apiGet("review"),
     ]);
     renderStats(stats);
     renderRounds(rounds.rows || []);
     renderActive((rounds.rows || []).length);
     renderHistory(history.items || []);
     fillPresets(preset);
+    renderJourney(promotion);
+    renderReview(review?.review || null);
     el.dot.className = "dot ok";
   } catch (error) {
     setFatal("读取失败：" + (error?.message || error));
+  }
+}
+
+function renderJourney(view) {
+  const lines = [];
+  if (!view || view.error) {
+    lines.push("放权状态不可用：" + (view?.error || "未知"));
+  } else if (!view.enabled) {
+    lines.push("未启用（在插件配置 → 阶梯放权 里打开）");
+  } else {
+    lines.push(
+      `当前 ${view.current_mode} · 已运行 ${view.elapsed_days} 天 · 目标 ${view.target_stage}`
+    );
+    if (view.next_stage && view.next_stage !== "-") {
+      lines.push(`再 ${view.days_to_next} 天 → ${view.next_stage}`);
+    } else {
+      lines.push("已到最终档位");
+    }
+    if (view.paused) lines.push("已暂停：" + (view.pause_reason || "用户手动改档"));
+  }
+  el.journey.line.textContent = lines.join(" · ");
+  el.journey.stage.textContent = view?.target_stage ? `目标 ${view.target_stage}` : "";
+}
+
+function renderReview(report) {
+  if (!report || !report.text) {
+    el.review.day.textContent = "";
+    el.review.text.textContent =
+      "暂无复盘。在插件配置里打开「每日复盘」后，每天会生成一份。";
+    return;
+  }
+  el.review.day.textContent = report.day || "";
+  el.review.text.textContent = report.text;
+}
+
+async function onJourneyReset() {
+  el.journey.reset.disabled = true;
+  try {
+    await bridge.apiPost("promotion/reset", {});
+    await loadAll();
+  } catch (error) {
+    setFatal("重置放权失败：" + (error?.message || error));
+  } finally {
+    el.journey.reset.disabled = false;
   }
 }
 
@@ -346,6 +396,7 @@ async function boot() {
   el.preset.addEventListener("change", onPresetChange);
   el.reset.addEventListener("click", onReset);
   el.refresh.addEventListener("click", loadAll);
+  el.journey.reset.addEventListener("click", onJourneyReset);
 
   await loadAll();
   await startLive();

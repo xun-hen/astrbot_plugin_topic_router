@@ -318,5 +318,73 @@
     "type": "bool",
     "default": false,
     "hint": "开启后会在 plugin_data/astrbot_plugin_topic_router_pro/trace.log 里追加 ENTRY / HOOK / VERDICT 三类行（单文件封顶 512KB 后轮转）。用途：日志有级别限制、格式差异，还会把你敲的命令本身记进去造成假阳性，而落盘不受这些影响——要判断「消息入口到底有没有被派发」时，它是唯一可信的证据源。平时可关闭。"
+  },
+  "promotion": {
+    "description": "阶梯放权（mark → hint → auto，按天自动升级）",
+    "type": "object",
+    "hint": "先观察几天再逐步放权：启用后从当前档位开始计时，跑满 mark_days 天自动切 hint，再跑满 hint_days 天自动切 auto。只升不降；用户手动改过 mode 会自动暂停，点插件页面的「重新计时」可恢复。",
+    "items": {
+      "enabled": {
+        "description": "启用阶梯放权",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭（插件不会自动改你的 mode）。打开后按下面的天数自动升级档位。"
+      },
+      "mark_days": {
+        "description": "mark 阶段观察天数",
+        "type": "float",
+        "default": 3.0,
+        "hint": "从启用时刻算起，这段时间保持 mark（只记录不干预）；到期自动切 hint。"
+      },
+      "hint_days": {
+        "description": "hint 阶段天数",
+        "type": "float",
+        "default": 3.0,
+        "hint": "hint 阶段到期后自动切 auto（to_auto=false 时停在 hint）。"
+      },
+      "to_auto": {
+        "description": "最终是否进入 auto",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭则只升到 hint 为止（不想让插件自动切对话时用）。"
+      }
+    }
+  },
+  "review": {
+    "description": "每日复盘（用模型整理当天的判定数据）",
+    "type": "object",
+    "hint": "每天定时把当天的判定流水（条数、新话题占比、置信度分布、可疑样例）交给模型，生成一份复盘：判得准不准、哪里可能误判、要不要进下一档。报告存在 plugin_data/astrbot_plugin_topic_router_pro/review/YYYY-MM-DD.md，也能在插件详情页看到最新一份。",
+    "items": {
+      "enabled": {
+        "description": "启用每日复盘",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后每天一次模型调用（几百 token，量很小）。关闭则完全不生成。"
+      },
+      "hour": {
+        "description": "每天几点生成",
+        "type": "int",
+        "default": 23,
+        "hint": "24 小时制，0~23。到点后第一次检查时生成；同一天只生成一份。"
+      },
+      "provider_id": {
+        "description": "复盘用模型",
+        "type": "string",
+        "default": "",
+        "hint": "留空则依次回退：判定模型 provider_id → 当天最活跃会话的当前模型。填错不影响聊天，只是复盘退回本地统计。"
+      },
+      "only_before_auto": {
+        "description": "只在进入 auto 之前复盘",
+        "type": "bool",
+        "default": true,
+        "hint": "auto 阶段判定已经直接改上下文，复盘的「要不要放权」意义不大，默认跳过。"
+      },
+      "keep_days": {
+        "description": "流水与报告保留天数",
+        "type": "int",
+        "default": 14,
+        "hint": "超过天数的 judgments-*.jsonl 会被清理；报告 markdown 不自动删。"
+      }
+    }
   }
 }

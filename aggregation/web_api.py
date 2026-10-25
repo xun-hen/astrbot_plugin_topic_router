@@ -220,6 +220,78 @@ class PageApi:
         self.plugin.stats.reset()
         return json_response({"reset": True, "revision": self.plugin.stats.revision})
 
+    # ------------------------------------------------------------------ 放权 / 复盘
+    def _extra(self, key: str) -> Any:
+        """取 router 挂上来的旁路能力（放权/复盘），没有就返回 None。
+
+        Args:
+            key: `promotion` / `promotion_reset` / `review` / `run_review`。
+
+        Returns:
+            可调用对象或 None。
+        """
+        extras = getattr(self.plugin, "extras", None)
+        if not isinstance(extras, dict):
+            return None
+        return extras.get(key)
+
+    async def api_promotion(self) -> Any:
+        """阶梯放权进度（GET）。
+
+        Returns:
+            JSON 响应。
+        """
+        view = self._extra("promotion")
+        if not callable(view):
+            return json_response({"enabled": False, "error": "promotion unavailable"})
+        try:
+            return json_response(view())
+        except Exception as exc:  # noqa: BLE001
+            return error_response(f"promotion view failed: {exc}", status_code=500)
+
+    async def api_promotion_reset(self) -> Any:
+        """重置放权计时（POST）。
+
+        Returns:
+            JSON 响应。
+        """
+        reset = self._extra("promotion_reset")
+        if not callable(reset):
+            return error_response("promotion unavailable", status_code=501)
+        try:
+            return json_response(await reset())
+        except Exception as exc:  # noqa: BLE001
+            return error_response(f"promotion reset failed: {exc}", status_code=500)
+
+    async def api_review(self) -> Any:
+        """最新一份每日复盘（GET）。
+
+        Returns:
+            JSON 响应。
+        """
+        view = self._extra("review")
+        if not callable(view):
+            return json_response({"review": None})
+        try:
+            return json_response({"review": view()})
+        except Exception as exc:  # noqa: BLE001
+            return error_response(f"review view failed: {exc}", status_code=500)
+
+    async def api_review_run(self) -> Any:
+        """立即生成今天的复盘（POST）。
+
+        Returns:
+            JSON 响应。
+        """
+        run = self._extra("run_review")
+        if not callable(run):
+            return error_response("review unavailable", status_code=501)
+        try:
+            report = await run()
+            return json_response({"review": report})
+        except Exception as exc:  # noqa: BLE001
+            return error_response(f"review failed: {exc}", status_code=500)
+
     # ------------------------------------------------------------------ SSE
     async def api_events(self) -> Any:
         """SSE：按 `page_push_interval` 推送摘要，**变化才推**（§24.4）。
@@ -275,6 +347,8 @@ ROUTES = (
     ("/{plugin}/rounds", "api_rounds", ("GET",), "Live rounds"),
     ("/{plugin}/history", "api_history", ("GET",), "Flush history"),
     ("/{plugin}/preset", "api_preset", ("GET",), "Current preset"),
+    ("/{plugin}/promotion", "api_promotion", ("GET",), "Promotion progress"),
+    ("/{plugin}/review", "api_review", ("GET",), "Latest daily review"),
     ("/{plugin}/events", "api_events", ("GET",), "SSE summary"),
 )
 
@@ -315,8 +389,20 @@ def register(context: Any, plugin: Any) -> bool:
         context.register_web_api(
             f"/{PLUGIN_NAME}/stats/reset", api.api_reset, ["POST"], "Reset stats"
         )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/promotion/reset",
+            api.api_promotion_reset,
+            ["POST"],
+            "Reset promotion clock",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/review/run",
+            api.api_review_run,
+            ["POST"],
+            "Run daily review now",
+        )
     except Exception as exc:  # noqa: BLE001 - 页面不可用不能拖垮插件
         logger.exception(f"[{PLUGIN_NAME}] 注册页面后端失败：{exc}")
         return False
-    logger.info(f"[{PLUGIN_NAME}] 页面后端已注册 {len(ROUTES) + 2} 个路由")
+    logger.info(f"[{PLUGIN_NAME}] 页面后端已注册 {len(ROUTES) + 4} 个路由")
     return True

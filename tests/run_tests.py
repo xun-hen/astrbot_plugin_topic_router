@@ -1,4 +1,4 @@
-"""离线测试：不启动 AstrBot，用假 context/event 跑通判定与动作层。
+﻿"""离线测试：不启动 AstrBot，用假 context/event 跑通判定与动作层。
 
 跑法（需要用 AstrBot 自带的 Python 运行时，才能 import 到真实的 astrbot 模块）：
 
@@ -1796,6 +1796,104 @@ async def test_trace_landing(module) -> None:
     check("关闭 trace_enabled 后不产生 trace.log", not off_path.exists(), str(off_path))
 
 
+async def test_promotion_and_review(module) -> None:
+    """验证阶梯放权与每日复盘（v0.10.0）。
+
+    Args:
+        module: 插件模块（`...router`）。
+    """
+    print("\n[21] 阶梯放权 + 每日复盘")
+    journey_mod = sys.modules[
+        "data.plugins.astrbot_plugin_topic_router_pro.journey"
+    ]
+    daily_mod = sys.modules[
+        "data.plugins.astrbot_plugin_topic_router_pro.daily"
+    ]
+
+    plan = journey_mod.Plan(enabled=True, mark_days=3.0, hint_days=3.0, to_auto=True)
+    check(
+        "天数 -> 档位（2.9 天仍是 mark）",
+        journey_mod.target_stage(2.9, plan) == "mark",
+        journey_mod.target_stage(2.9, plan),
+    )
+    check(
+        "天数 -> 档位（3.0 天进入 hint）",
+        journey_mod.target_stage(3.0, plan) == "hint",
+        journey_mod.target_stage(3.0, plan),
+    )
+    check(
+        "天数 -> 档位（6.0 天进入 auto）",
+        journey_mod.target_stage(6.0, plan) == "auto",
+        journey_mod.target_stage(6.0, plan),
+    )
+    check(
+        "to_auto=False 时停在 hint",
+        journey_mod.target_stage(99.0, journey_mod.Plan(True, 3, 3, False)) == "hint",
+    )
+
+    tmp = Path(tempfile.mkdtemp(prefix="topic-router-journey-"))
+    try:
+        journey = journey_mod.Journey(tmp / "promotion.json")
+        start = 1_000_000.0
+        journey.start(start, "mark")
+        check("刚启动时不动", journey.step(start, plan, "mark") is None)
+        check(
+            "第 4 天自动切 hint",
+            journey.step(start + 4 * 86400, plan, "mark") == "hint",
+        )
+        check(
+            "切 hint 之后不会重复切",
+            journey.step(start + 4.5 * 86400, plan, "hint") is None,
+        )
+        check(
+            "第 7 天自动切 auto",
+            journey.step(start + 7 * 86400, plan, "hint") == "auto",
+        )
+
+        # 用户手动改档：暂停，不再覆盖
+        journey2 = journey_mod.Journey(tmp / "promotion2.json")
+        journey2.start(start, "mark")
+        journey2.step(start + 4 * 86400, plan, "mark")  # -> hint（自动写入，last_applied=hint）
+        paused = journey2.step(start + 5 * 86400, plan, "mark")
+        check("检测到手动改档后暂停", paused is None and journey2.paused is True,
+              f"{paused} paused={journey2.paused}")
+
+        # 每日复盘：流水 + 统计 + 兜底摘要
+        log = daily_mod.JudgmentLog(tmp / "review" / "logs", keep_days=3)
+        for idx in range(4):
+            log.append(
+                {
+                    "ts": time.time() + idx,
+                    "umo": "aiocqhttp:FriendMessage:r",
+                    "text": f"消息{idx}",
+                    "verdict": "new" if idx % 2 == 0 else "continue",
+                    "confidence": 0.9 if idx == 0 else 0.5,
+                    "source": "heuristic",
+                    "mode": "mark",
+                    "via": "event",
+                },
+            )
+        records = log.read_day()
+        check("判定流水写入并读回", len(records) == 4, str(len(records)))
+        stats = daily_mod.summarize(records, "2026-10-25")
+        check("统计：新话题 2 条", stats["new_topic"] == 2, str(stats["new_topic"]))
+        check("统计：低置信度样例被收集", len(stats["samples"]) == 1,
+              str(len(stats["samples"])))
+        text = daily_mod.compose_review(stats, "")
+        check("模型不可用时退回本地摘要", "本地摘要" in text, text[:40])
+
+        store = daily_mod.ReviewStore(tmp / "review")
+        store.save("2026-10-25", text)
+        latest = store.latest()
+        check(
+            "复盘报告可读回",
+            latest is not None and latest["day"] == "2026-10-25",
+            str(latest and latest["day"]),
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 async def test_aggregation_integration(module) -> None:
     """验证内建消息聚合与话题判定的流水线衔接。
 
@@ -1984,8 +2082,17 @@ async def test_aggregation_integration(module) -> None:
     web_ctx = FakeWebCtx()
     web_api.register(web_ctx, service)
     check(
-        "页面后端注册 7 个路由",
-        len(web_ctx.routes) == 7,
+        "页面后端注册 11 个路由（含放权/复盘）",
+        len(web_ctx.routes) == 11,
+        str(web_ctx.routes),
+    )
+    check(
+        "放权与复盘的 GET 路由都在",
+        {
+            "/astrbot_plugin_topic_router_pro/promotion",
+            "/astrbot_plugin_topic_router_pro/review",
+        }
+        <= {route for route, _ in web_ctx.routes},
         str(web_ctx.routes),
     )
     check(
@@ -2192,6 +2299,7 @@ async def main() -> int:
         await test_long_idle_gap(plugin_main)
         await test_trace_landing(plugin_main)
         await test_aggregation_integration(plugin_main)
+        await test_promotion_and_review(MODULE)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
         FAILED.append("测试脚本本身抛异常")
@@ -2207,3 +2315,4 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
+
