@@ -255,11 +255,18 @@ tbody tr:hover { background: var(--card-2); }
 .review ul { margin: 6px 0; padding-left: 1.2rem; }
 .review li { margin: 3px 0; }
 .review strong { color: var(--fg); font-weight: 600; }
+.review .review-lead { margin: 14px 0 4px; }
+.review .review-lead strong { color: var(--accent); }
 .review hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
 .review .review-meta { color: var(--muted); font-size: 12.5px; }
 
 /* ---------------------------------------------------------------- 设置表单 */
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+.settings-form + .row {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
 
 .settings-form { display: block; }
 
@@ -271,8 +278,8 @@ tbody tr:hover { background: var(--card-2); }
 }
 
 .settings-form .settings-group {
-  margin: 0 0 14px;
-  padding: 14px 16px;
+  margin: 0 0 12px;
+  padding: 12px 16px 14px;
   background: var(--card-2);
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -314,8 +321,8 @@ tbody tr:hover { background: var(--card-2); }
 
 .settings-form .fields {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(16.5rem, 1fr));
-  gap: 14px 20px;
+  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+  gap: 16px 24px;
   padding: 14px 0 2px;
 }
 
@@ -348,10 +355,7 @@ tbody tr:hover { background: var(--card-2); }
 
 /* 滑动开关：把设置里的 bool 统一成 toggle */
 .settings-form .field-check {
-  flex-direction: row;
-  align-items: center;
-  gap: 10px;
-  padding-top: 20px;
+  align-items: flex-start;
 }
 .settings-form .field-check .field-label {
   font-size: 13px;

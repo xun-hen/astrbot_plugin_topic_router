@@ -303,9 +303,16 @@ function reviewToHtml(text) {
       closeList();
       continue;
     }
-    if (line.startsWith("# ")) {
+    const heading = line.match(/^#{1,3}\s+(.*)$/);
+    if (heading) {
       closeList();
-      out.push(`<h3>${inlineMd(line.slice(2))}</h3>`);
+      out.push(`<h3>${inlineMd(heading[1])}</h3>`);
+      continue;
+    }
+    const lead = line.match(/^\*\*(.+?)\*\*\s*[:：]\s*(.*)$/);
+    if (lead) {
+      closeList();
+      out.push(`<p class="review-lead"><strong>${inlineMd(lead[1])}</strong>：${inlineMd(lead[2])}</p>`);
       continue;
     }
     if (line.startsWith("- ")) {
@@ -390,11 +397,7 @@ function buildField(key, spec, value) {
   label.className = "field-label";
   label.textContent = fieldLabel(key, spec);
   const input = makeInput(key, spec, value);
-  if (kind === "bool") {
-    wrap.append(input, label);
-  } else {
-    wrap.append(label, input);
-  }
+  wrap.append(label, input);
   if (spec && spec.hint) wrap.title = spec.hint;
   return wrap;
 }
