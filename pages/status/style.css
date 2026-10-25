@@ -1,302 +1,401 @@
-/* 闆朵緷璧栵細涓嶅紩鍏ヤ换浣?CSS 妗嗘灦涓庡浘鏍囧瓧浣撱€備富棰樿蛋 Dashboard 娉ㄥ叆鐨?data-theme銆?*/
+/* 零依赖样式：只用 Dashboard 注入的 data-theme 与系统偏好，不引入任何框架/字体。 */
 
 :root {
-  --bg: #ffffff;
-  --fg: #1a1a1a;
+  --bg: #f6f7f9;
+  --fg: #1b1d22;
+  --fg-soft: #4b5058;
   --muted: #6b7280;
-  --line: #e5e7eb;
-  --panel: #f9fafb;
-  --accent: #1f4e79;
-  --accent-soft: #dbeafe;
+  --line: #e3e6ea;
+  --card: #ffffff;
+  --card-2: #f2f4f7;
+  --input-bg: #ffffff;
+  --input-line: #d5d9df;
+  --accent: #3d7ef0;
+  --accent-strong: #2f6ad9;
+  --accent-soft: rgba(61, 126, 240, 0.12);
+  --ok: #16a34a;
   --warn: #b45309;
-  --danger: #b91c1c;
-  --bar: #2e5c8a;
+  --danger: #c0392b;
+  --bar: #3d7ef0;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 12px rgba(16, 24, 40, 0.04);
 }
 
 [data-theme="dark"] {
-  --bg: #16181c;
-  --fg: #e6e8eb;
-  --muted: #9aa3ad;
-  --line: #2a2e35;
-  --panel: #1d2025;
-  --accent: #7fb3e8;
-  --accent-soft: #1e3a5f;
-  --warn: #f0b429;
-  --danger: #f87171;
-  --bar: #4b83c4;
+  --bg: #101216;
+  --fg: #e8eaee;
+  --fg-soft: #c3c8d0;
+  --muted: #9aa2ad;
+  --line: #2a2f37;
+  --card: #191c22;
+  --card-2: #20242b;
+  --input-bg: #0e1014;
+  --input-line: #333a45;
+  --accent: #6ea8ff;
+  --accent-strong: #8ebcff;
+  --accent-soft: rgba(110, 168, 255, 0.16);
+  --ok: #4ade80;
+  --warn: #f5b544;
+  --danger: #ff7b72;
+  --bar: #6ea8ff;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101216;
+    --fg: #e8eaee;
+    --fg-soft: #c3c8d0;
+    --muted: #9aa2ad;
+    --line: #2a2f37;
+    --card: #191c22;
+    --card-2: #20242b;
+    --input-bg: #0e1014;
+    --input-line: #333a45;
+    --accent: #6ea8ff;
+    --accent-strong: #8ebcff;
+    --accent-soft: rgba(110, 168, 255, 0.16);
+    --ok: #4ade80;
+    --warn: #f5b544;
+    --danger: #ff7b72;
+    --bar: #6ea8ff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  padding: 16px;
+  padding: 20px 22px 32px;
   background: var(--bg);
   color: var(--fg);
-  font: 14px/1.6 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font: 13.5px/1.55 "Microsoft YaHei", "PingFang SC", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 h2 {
-  margin: 0 0 10px;
-  font-size: 14px;
+  margin: 0 0 12px;
+  font-size: 15px;
   font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--fg);
 }
 
 .muted { color: var(--muted); font-weight: 400; font-size: 12px; }
 
+/* ---------------------------------------------------------------- 顶部栏 */
 .bar {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 12px;
+  padding: 2px 2px 16px;
   border-bottom: 1px solid var(--line);
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 
-.bar-title { display: flex; align-items: center; gap: 8px; }
-.bar-title strong { font-size: 16px; }
+.bar-title { display: flex; align-items: center; gap: 10px; }
+.bar-title strong { font-size: 17px; letter-spacing: 0.01em; }
 .bar-actions { display: flex; align-items: center; gap: 8px; }
 
 .dot {
-  width: 8px; height: 8px; border-radius: 50%;
+  width: 9px; height: 9px; border-radius: 50%;
   background: var(--muted); flex: none;
 }
-.dot.ok { background: #16a34a; }
+.dot.ok { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 .dot.wait { background: var(--warn); }
 .dot.bad { background: var(--danger); }
 
-select, button {
+/* ---------------------------------------------------------------- 控件 */
+button, select, input[type="text"], input[type="number"], input[type="search"] {
   font: inherit;
   color: var(--fg);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 4px 10px;
-  cursor: pointer;
+  background: var(--input-bg);
+  border: 1px solid var(--input-line);
+  border-radius: 8px;
+  padding: 6px 11px;
+  transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
 }
-button:hover { border-color: var(--accent); }
+
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); color: var(--accent); }
 button.ghost { background: transparent; }
-button:disabled { opacity: .5; cursor: default; }
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+button.primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; }
+button:disabled { opacity: .55; cursor: default; }
+
+input:focus, select:focus, button:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
 
 .fatal {
   margin: 0 0 16px;
-  padding: 10px 12px;
-  border: 1px solid var(--danger);
-  border-radius: 8px;
+  padding: 11px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  border-radius: 10px;
   color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
+/* ---------------------------------------------------------------- 统计卡片 */
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
 }
 
 .card {
-  display: flex; flex-direction: column; gap: 2px;
-  padding: 12px 14px;
-  background: var(--panel);
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 14px 16px;
+  background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
 }
-.card-label { color: var(--muted); font-size: 12px; }
-.card-value { font-size: 24px; line-height: 1.2; font-variant-numeric: tabular-nums; }
-.card-hint { color: var(--muted); font-size: 11px; }
+.card-label { color: var(--muted); font-size: 12px; letter-spacing: 0.02em; }
+.card-value { font-size: 26px; line-height: 1.15; font-weight: 600; font-variant-numeric: tabular-nums; }
+.card-hint { color: var(--muted); font-size: 11.5px; }
 
+/* ---------------------------------------------------------------- 面板 */
 .grid-2 {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
 }
 
 .panel {
-  padding: 12px 14px;
-  margin-bottom: 12px;
-  background: var(--panel);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+  background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
 }
 
-.bars { display: flex; flex-direction: column; gap: 8px; }
+.panel > h2 .muted { font-weight: 400; margin-left: 6px; }
 
-.bar-row { display: grid; grid-template-columns: 96px 1fr 48px; gap: 8px; align-items: center; }
+/* ---------------------------------------------------------------- 条形图 */
+.bars { display: flex; flex-direction: column; gap: 10px; }
+
+.bar-row { display: grid; grid-template-columns: 104px 1fr 52px; gap: 10px; align-items: center; }
 .bar-row .name { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bar-row .track { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
-.bar-row .fill { height: 100%; background: var(--bar); border-radius: 5px; }
+.bar-row .track { height: 8px; background: var(--card-2); border-radius: 999px; overflow: hidden; }
+.bar-row .fill { height: 100%; background: var(--bar); border-radius: 999px; }
 .bar-row .num { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; }
 
+/* ---------------------------------------------------------------- 直方图 */
 .latency svg { width: 100%; height: 140px; display: block; }
-.latency-meta { display: flex; gap: 16px; margin-top: 6px; color: var(--muted); font-size: 12px; }
+.latency-meta { display: flex; gap: 18px; margin-top: 8px; color: var(--muted); font-size: 12px; }
 .latency-meta b { color: var(--fg); font-variant-numeric: tabular-nums; }
 
+/* ---------------------------------------------------------------- 表格 */
 .table-wrap { overflow-x: auto; }
 
 table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { color: var(--muted); font-weight: 500; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; background: transparent; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--card-2); }
 
 .tag {
   display: inline-block;
-  padding: 1px 6px;
-  border-radius: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
   font-size: 11px;
   background: var(--accent-soft);
   color: var(--accent);
 }
-.tag.done { background: color-mix(in srgb, #16a34a 15%, transparent); color: #15803d; }
-.tag.abort { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
+.tag.done { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.tag.abort { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
 
-.empty { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.empty { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
 
 .notice {
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--warn);
+  margin: 0 0 14px;
+  padding: 11px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
   border-left-width: 3px;
-  border-radius: 8px;
+  border-radius: 10px;
   color: var(--warn);
   font-size: 12.5px;
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
 }
 
+/* ---------------------------------------------------------------- 复盘正文 */
 .review {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 0.82rem;
-  line-height: 1.55;
-  max-height: 22rem;
-  overflow: auto;
   margin: 0;
+  padding: 2px 2px 0;
+  max-height: 26rem;
+  overflow: auto;
+  color: var(--fg-soft);
+  font-size: 13px;
+  line-height: 1.7;
 }
 
-
-
-.settings-form {
-  display: block;
-  margin-top: 0.2rem;
+.review h3 {
+  margin: 14px 0 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--fg);
+  padding-left: 9px;
+  border-left: 3px solid var(--accent);
 }
+.review h3:first-child { margin-top: 2px; }
+.review p { margin: 6px 0; }
+.review ul { margin: 6px 0; padding-left: 1.2rem; }
+.review li { margin: 3px 0; }
+.review strong { color: var(--fg); font-weight: 600; }
+.review hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
+.review .review-meta { color: var(--muted); font-size: 12.5px; }
+
+/* ---------------------------------------------------------------- 设置表单 */
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+
+.settings-form { display: block; }
 
 .settings-form .group-title {
-  margin: 0.9rem 0 0.3rem;
-  font-size: 0.86rem;
+  margin: 0 0 10px;
+  font-size: 13.5px;
   font-weight: 600;
-  color: rgba(0, 0, 0, 0.75);
+  color: var(--fg-soft);
 }
 
 .settings-form .settings-group {
-  margin: 0.7rem 0 0;
-  border-top: 1px solid rgba(0, 0, 0, 0.08);
-  padding-top: 0.35rem;
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
 }
 
 .settings-form summary {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 8px;
   cursor: pointer;
-  font-size: 0.88rem;
+  font-size: 13.5px;
   font-weight: 600;
-  color: rgba(0, 0, 0, 0.8);
-  padding: 0.25rem 0;
-  list-style-position: inside;
+  color: var(--fg);
+  padding: 2px 0;
+  list-style: none;
 }
+.settings-form summary::-webkit-details-marker { display: none; }
+.settings-form summary::before {
+  content: "▸";
+  color: var(--muted);
+  font-size: 11px;
+  transition: transform .15s ease;
+}
+.settings-form details[open] > summary::before { transform: rotate(90deg); }
 
 .settings-form .group-count {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 1.4rem;
-  height: 1.15rem;
-  padding: 0 0.35rem;
+  min-width: 1.5rem;
+  height: 1.2rem;
+  padding: 0 0.4rem;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.06);
-  font-size: 0.7rem;
-  font-weight: 500;
-  color: rgba(0, 0, 0, 0.55);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .settings-form .fields {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(15.5rem, 1fr));
-  gap: 0.55rem 1.1rem;
-  padding: 0.45rem 0 0.3rem;
+  grid-template-columns: repeat(auto-fill, minmax(16.5rem, 1fr));
+  gap: 14px 20px;
+  padding: 14px 0 2px;
 }
 
 .settings-form .field {
   display: flex;
   flex-direction: column;
-  gap: 0.22rem;
+  gap: 6px;
   min-width: 0;
 }
 
 .settings-form .field-label {
-  font-size: 0.78rem;
-  line-height: 1.3;
-  color: rgba(0, 0, 0, 0.6);
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--muted);
 }
 
 .settings-form .field-input {
   width: 100%;
   min-width: 0;
-  padding: 0.22rem 0.4rem;
-  font-size: 0.82rem;
-  border: 1px solid rgba(0, 0, 0, 0.16);
-  border-radius: 4px;
-  background: #fff;
-  color: rgba(0, 0, 0, 0.85);
+  padding: 7px 10px;
+  font-size: 13px;
+  background: var(--input-bg);
+  border: 1px solid var(--input-line);
+  border-radius: 8px;
+  color: var(--fg);
 }
 
-.settings-form input[type='number'].field-input {
-  max-width: 8rem;
-}
+.settings-form input[type="number"].field-input { max-width: 9rem; }
+.settings-form select.field-input { max-width: 12rem; }
 
-.settings-form select.field-input {
-  max-width: 11rem;
-}
-
+/* 滑动开关：把设置里的 bool 统一成 toggle */
 .settings-form .field-check {
   flex-direction: row;
   align-items: center;
-  gap: 0.45rem;
-  padding-top: 1.1rem;
+  gap: 10px;
+  padding-top: 20px;
 }
-
 .settings-form .field-check .field-label {
-  font-size: 0.82rem;
-  color: rgba(0, 0, 0, 0.78);
+  font-size: 13px;
+  color: var(--fg-soft);
 }
-
-.settings-form .field-input:focus {
+.settings-form .field-check input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--input-line);
+  position: relative;
+  cursor: pointer;
+  transition: background .18s ease;
+  margin: 0;
+}
+.settings-form .field-check input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+  transition: transform .18s ease;
+}
+.settings-form .field-check input[type="checkbox"]:checked {
+  background: var(--accent);
+}
+.settings-form .field-check input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
+}
+.settings-form .field-check input[type="checkbox"]:focus-visible {
   outline: none;
-  border-color: rgba(0, 0, 0, 0.45);
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-@media (prefers-color-scheme: dark) {
-  .settings-form .field-input {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(255, 255, 255, 0.18);
-    color: rgba(255, 255, 255, 0.9);
-  }
-  .settings-form .field-label,
-  .settings-form summary,
-  .settings-form .group-title {
-    color: rgba(255, 255, 255, 0.72);
-  }
-  .settings-form .group-count {
-    background: rgba(255, 255, 255, 0.1);
-    color: rgba(255, 255, 255, 0.6);
-  }
-  .settings-form .field-check .field-label {
-    color: rgba(255, 255, 255, 0.86);
-  }
-  .settings-form .settings-group {
-    border-top-color: rgba(255, 255, 255, 0.12);
-  }
+@media (max-width: 640px) {
+  body { padding: 14px; }
+  .settings-form .fields { grid-template-columns: 1fr; }
+  .settings-form input[type="number"].field-input,
+  .settings-form select.field-input { max-width: none; }
 }

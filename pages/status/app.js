@@ -276,15 +276,62 @@ function renderJourney(view) {
   el.journey.stage.textContent = view?.target_stage ? `目标 ${view.target_stage}` : "";
 }
 
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]
+  ));
+}
+
+function inlineMd(text) {
+  return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+}
+
+// 极简 markdown：标题、列表、粗体、空行分段——够复盘报告用，不引第三方库。
+function reviewToHtml(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const out = [];
+  let inList = false;
+  const closeList = () => {
+    if (inList) {
+      out.push("</ul>");
+      inList = false;
+    }
+  };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) {
+      closeList();
+      continue;
+    }
+    if (line.startsWith("# ")) {
+      closeList();
+      out.push(`<h3>${inlineMd(line.slice(2))}</h3>`);
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      if (!inList) {
+        out.push("<ul>");
+        inList = true;
+      }
+      out.push(`<li>${inlineMd(line.slice(2))}</li>`);
+      continue;
+    }
+    closeList();
+    out.push(`<p>${inlineMd(line)}</p>`);
+  }
+  closeList();
+  return out.join("\n");
+}
+
 function renderReview(report) {
   if (!report || !report.text) {
     el.review.day.textContent = "";
     el.review.text.textContent =
-      "暂无复盘。打开「每日复盘」后，每天会生成一份；也可以点下面的「立即生成」。";
-  } else {
-    el.review.day.textContent = report.day || "";
-    el.review.text.textContent = report.text;
+      "暂无复盘。打开「每日复盘」后，每天会生成一份；也可以点上面的「立即生成」。";
+    return;
   }
+  el.review.day.textContent = report.day || "";
+  el.review.text.innerHTML = reviewToHtml(report.text);
 }
 
 // ---------------------------------------------------------------- 全部设置
