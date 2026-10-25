@@ -80,6 +80,7 @@ class AggregationService:
         seen_attr: str = SEEN_ATTR,
         message_handler_name: str = "handle_message_v090",
         clock: Any = None,
+        persist_preset: Any = None,
     ) -> None:
         """初始化。
 
@@ -91,12 +92,15 @@ class AggregationService:
             message_handler_name: 消息 handler 的函数名，用于核对该事件是否
                 真的被派发到了本插件（抢占检测的必要条件）。
             clock: 注入的时间源（测试用 FakeClock）。
+            persist_preset: 页面切换预设后把显式值写回插件配置的回调。
+                v0.9.3 之前只改内存里的 Config，重载插件就回到旧设置。
         """
         self.context = context
         self.cfg: Config = load_config(config)
         self.clock = clock or RealClock()
         self.seen_attr = seen_attr
         self.message_handler_name = message_handler_name
+        self.persist_preset = persist_preset
         self.on_settled: OnSettled | None = None
         """合并并重构事件成功后的回调（话题判定挂在这里）。
 
@@ -775,7 +779,23 @@ class AggregationService:
         self.stats.cfg = self.cfg
         self.attachments.cfg = self.cfg
         effective = dict(PRESETS[name])
+        applied = {key: getattr(self.cfg, key) for key in PRESETS[name]}
+        applied["preset"] = self.cfg.preset
         logger.info(f"[{PLUGIN_NAME}] 聚合预设已切换为 {name}：{effective}")
+
+        # v0.9.3：把显式值写回插件配置。只改内存的话，重载插件/重启 AstrBot 就
+        # 悄悄回到旧预设，页面显示的也是旧值（现场踩过：页面显示 patient，
+        # 重建后变回 balanced）。写失败不影响本次生效，只记一条 warning。
+        persist = self.persist_preset
+        if callable(persist):
+            try:
+                persist(applied)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"[{PLUGIN_NAME}] 聚合预设写回配置失败（本次仍生效）："
+                    f"{type(exc).__name__}: {exc}"
+                )
+
         return {
             "debounce_time": self.cfg.debounce_time,
             "adaptive": self.cfg.adaptive,

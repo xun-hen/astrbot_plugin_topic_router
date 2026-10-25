@@ -734,6 +734,27 @@ def _aggregation_config() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _persist_aggregation_preset(values: dict[str, Any]) -> None:
+    """把页面切预设后的显式值写回插件配置并落盘（v0.9.3）。
+
+    只改内存里的 `Config` 时，重载插件 / 重启 AstrBot 会悄悄回到旧预设，页面也会
+    显示旧值。这里把生效值写进 `RUNTIME.config["aggregation"]`，再调用
+    AstrBotConfig 的 `save_config()`（离线测试里 `RUNTIME.config` 是普通 dict，
+    没有该方法，自然退化为只改内存）。
+
+    Args:
+        values: 预设生效的字段（含 `preset` 本身）。
+    """
+    config = RUNTIME.config
+    aggregation = config.get("aggregation") if isinstance(config, dict) else None
+    if not isinstance(aggregation, dict):
+        return
+    aggregation.update(values)
+    save = getattr(config, "save_config", None)
+    if callable(save):
+        save()
+
+
 def _init_aggregation(ctx: Context | None) -> None:
     """按配置创建内建聚合服务（关闭时什么都不做）。
 
@@ -768,6 +789,7 @@ def _init_aggregation(ctx: Context | None) -> None:
             data_dir=_plugin_data_dir(),
             seen_attr=SEEN_ATTR,
             message_handler_name=MESSAGE_HANDLER_NAME,
+            persist_preset=_persist_aggregation_preset,
         )
         service.on_settled = _on_aggregated
         RUNTIME.aggregation = service

@@ -20,6 +20,17 @@ _MID_BONUS = 0.8
 _SHORT_BONUS = 0.5
 _STREAK_BONUS = 0.5
 _TERMINAL_DISCOUNT = 0.4
+_UNFINISHED_BONUS = 1.0
+"""句末没有任何标点时的加成（v0.9.3）。
+
+中文聊天里绝大多数消息**不以标点结尾**（"帮我看看 NAS 硬盘"），而这恰恰是
+"话可能还没说完、下一条马上就来"的最强信号。v0.9.2 之前只有"句末是逗号"才加时间，
+于是连发的消息总是差 0.3~1 秒落在窗口外，聚合看起来像没生效。
+
+实测（2026-10-25，NAS）：用户连发的相邻消息间隔 2.4~3.9 秒，而窗口只有
+2.0~2.5 秒。加这 1.0 秒后，短句的有效窗口变成 2.0 + 0.5 + 1.0 = 3.5 秒，
+刚好覆盖，同时**不拖慢**已经用句号/问号/感叹号收尾的句子。
+"""
 
 
 def adaptive_wait(
@@ -55,6 +66,10 @@ def adaptive_wait(
             wait += _SHORT_BONUS
         elif tail_char in _TERMINAL_PUNCT:
             wait -= _TERMINAL_DISCOUNT
+    else:
+        # 没有任何句末标点：中文聊天里最常见的"话没说完"，按未完句多等一点。
+        # 这一条是 v0.9.3 加的，看 `_UNFINISHED_BONUS` 的说明。
+        wait += _UNFINISHED_BONUS
 
     if short_streak >= 2:
         wait += _STREAK_BONUS

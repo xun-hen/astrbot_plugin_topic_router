@@ -1903,6 +1903,69 @@ async def test_aggregation_integration(module) -> None:
         f"items_total={service.stats.items_total}",
     )
 
+    # ---- v0.9.3：自适应窗口必须能覆盖"话没说完"的连发 ----
+    strategy = sys.modules[
+        "data.plugins.astrbot_plugin_topic_router_pro.aggregation.strategy"
+    ]
+
+    def _wait(text_len: int, tail: str) -> float:
+        """按默认配置算一次等待秒数。"""
+        return strategy.compute(
+            now=0.0,
+            started_at=0.0,
+            text_len=text_len,
+            tail_char=tail,
+            short_streak=0,
+            cooldown_remaining=0.0,
+            cfg=agg_cfg.Config(),
+        )
+
+    finished = _wait(12, "。")
+    unfinished = _wait(12, "")
+    short_unfinished = _wait(4, "")
+    check(
+        "话没说完（无句末标点）比已说完的句子多等 ≥0.8s",
+        unfinished >= finished + 0.8,
+        f"unfinished={unfinished} finished={finished}",
+    )
+    check(
+        "短句且无句末标点的有效窗口约 3.5s",
+        3.3 <= short_unfinished <= 3.7,
+        str(short_unfinished),
+    )
+
+    # ---- v0.9.3：页面切预设必须写回插件配置（否则重载即回退）----
+    class _PersistConfig(dict):
+        """带 save_config 的假配置（模拟 AstrBotConfig）。"""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.saved = 0
+
+        def save_config(self) -> None:
+            """记录落盘次数。"""
+            self.saved += 1
+
+    persist_cfg = _PersistConfig({"aggregation": {"preset": "balanced"}})
+    original_config = MODULE.RUNTIME.config
+    MODULE.RUNTIME.config = persist_cfg
+    try:
+        service.apply_preset("patient")
+        check(
+            "apply_preset 把生效值写回配置",
+            persist_cfg["aggregation"].get("debounce_time") == 3.5
+            and persist_cfg["aggregation"].get("preset") == "patient",
+            str(persist_cfg["aggregation"]),
+        )
+        check(
+            "写回后调用了 save_config",
+            persist_cfg.saved == 1,
+            str(persist_cfg.saved),
+        )
+    finally:
+        MODULE.RUNTIME.config = original_config
+
+
     # 页面后端：只验证路由注册（真实渲染由 Dashboard 负责）
     class FakeWebCtx:
         """只提供 register_web_api 的假上下文。"""
