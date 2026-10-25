@@ -1898,6 +1898,16 @@ async def test_promotion_and_review(module) -> None:
             )
             check('设置：写回触发 save_config', settings_cfg.saved == 1,
                   str(settings_cfg.saved))
+            MODULE.update_settings({'mode': 'hint'})
+            check(
+                '设置：顶层标量按 schema 写入',
+                settings_cfg.get('mode') == 'hint',
+                str(settings_cfg.get('mode')),
+            )
+            check(
+                '设置：schema 里没有的顶层键被忽略',
+                'no_such_key' not in MODULE.update_settings({'no_such_key': 1})['changed'],
+            )
         finally:
             MODULE.RUNTIME.config = original_settings_cfg
 
@@ -2125,8 +2135,8 @@ async def test_aggregation_integration(module) -> None:
     web_ctx = FakeWebCtx()
     web_api.register(web_ctx, service)
     check(
-        "页面后端注册 12 个路由（含放权/复盘/设置）",
-        len(web_ctx.routes) == 12,
+        "页面后端注册 14 个路由（含 schema/config）",
+        len(web_ctx.routes) == 14,
         str(web_ctx.routes),
     )
     check(
@@ -2358,5 +2368,6 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
+
 
 

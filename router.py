@@ -66,6 +66,7 @@ v0.9.0 把独立插件 `astrbot_plugin_msg_aggregator` 的核心迁入 `aggregat
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -867,108 +868,216 @@ def _promotion_view() -> dict[str, Any]:
     return journey.stage_view(time.time(), plan, _mode())
 
 
-_SETTINGS_SPEC: dict[str, dict[str, Any]] = {
-    "promotion": {
-        "enabled": "bool",
-        "mark_days": ("float", 0.0, 365.0),
-        "hint_days": ("float", 0.0, 365.0),
-        "to_auto": "bool",
-    },
-    "review": {
-        "enabled": "bool",
-        "hour": ("int", 0, 23),
-        "only_before_auto": "bool",
-        "keep_days": ("int", 1, 365),
-        "provider_id": "str",
-    },
+_SETTINGS_BOUNDS: dict[str, tuple[float, float]] = {
+    "promotion.mark_days": (0.0, 365.0),
+    "promotion.hint_days": (0.0, 365.0),
+    "review.hour": (0, 23),
+    "review.keep_days": (1, 365),
+    "aggregation.debounce_time": (0.1, 60.0),
+    "aggregation.adaptive_min_wait": (0.0, 60.0),
+    "aggregation.adaptive_max_wait": (0.0, 120.0),
+    "aggregation.adaptive_max_total_wait": (0.0, 600.0),
+    "aggregation.max_typing_wait": (0.0, 600.0),
+    "aggregation.min_interval_group": (0.0, 60.0),
+    "aggregation.min_interval_private": (0.0, 60.0),
+    "aggregation.interrupt_wait": (0.0, 60.0),
+    "aggregation.enrich_deadline": (0.0, 600.0),
+    "aggregation.stats_flush_interval": (5.0, 3600.0),
+    "aggregation.stats_flush_every": (1, 10000),
+    "aggregation.stats_max_dimensions": (1, 10000),
+    "aggregation.stats_history_size": (1, 2000),
+    "aggregation.page_push_interval": (0.2, 60.0),
+    "aggregation.cache_dir_ttl_hours": (1.0, 8760.0),
+    "aggregation.keep_max_bytes": (0, 10**10),
+    "aggregation.keep_total_max_bytes": (0, 10**10),
+    "aggregation.keep_round_max_bytes": (0, 10**10),
+    "timeout_seconds": (1.0, 600.0),
+    "max_checks_per_hour": (0, 100000),
+    "history_turns": (1, 50),
+    "time_gap_minutes": (0, 100000),
+    "min_message_length": (0, 10000),
+    "short_message_length": (0, 10000),
 }
-"""页面可改的配置白名单：键 -> 类型（或 `(类型, 下界, 上界)`）。
+"""数值型设置的合法区间（超出就夹紧，不是拒绝——页面滑一下不该报错）。"""
 
-只允许改这两组里的这几个键：页面是只读视图 + 少量开关，不能变成"随便改插件配置"
-的后门。
-"""
+_SCHEMA_CACHE: dict[str, Any] = {"mtime": 0.0, "data": {}}
 
 
-def _coerce_setting(value: Any, spec: Any) -> Any:
-    """按白名单把页面传来的值转成正确类型（越界抛 ValueError）。
+def settings_schema() -> dict[str, Any]:
+    """读取插件自带的 `_conf_schema.json`（按 mtime 缓存）。
 
-    Args:
-        value: 页面传来的原始值。
-        spec: 类型说明。
+    页面的「全部设置」表单是**照着 schema 生成的**：新增配置项时只要改 schema，
+    页面自动出现对应控件，不需要再维护第二份字段清单。
 
     Returns:
-        转换后的值。
-
-    Raises:
-        ValueError: 类型不对或超出范围。
+        schema 字典；读不到时返回空字典。
     """
-    if spec == "bool":
+    path = Path(__file__).with_name("_conf_schema.json")
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    if _SCHEMA_CACHE["data"] and _SCHEMA_CACHE["mtime"] == mtime:
+        return _SCHEMA_CACHE["data"]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    _SCHEMA_CACHE["mtime"] = mtime
+    _SCHEMA_CACHE["data"] = data
+    return data
+
+
+def _coerce_by_type(value: Any, kind: str | None) -> Any:
+    """按 schema 的 type 把页面传来的值转成正确类型。
+
+    Args:
+        value: 原始值（表单里基本都是字符串）。
+        kind: schema 里的 type。
+
+    Returns:
+        转换后的值；类型不认识时原样返回。
+    """
+    if kind == "bool":
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
-    if spec == "str":
-        return str(value or "")
-    kind, low, high = spec
     if kind == "int":
-        got = int(round(float(value)))
-    else:
-        got = float(value)
-    if got < low:
-        got = low
-    if got > high:
-        got = high
-    return got
+        return int(round(float(value)))
+    if kind == "float":
+        return float(value)
+    if kind in {"string", "text"}:
+        return str(value if value is not None else "")
+    if kind in {"list", "array"}:
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        return [part.strip() for part in str(value or "").split(",") if part.strip()]
+    return value
+
+
+def _clamp_setting(path: str, value: Any) -> Any:
+    """按 `_SETTINGS_BOUNDS` 夹紧数值（区间外的值不报错，直接夹到边界）。
+
+    Args:
+        path: `group.key` 或顶层键。
+        value: 已转换类型的值。
+
+    Returns:
+        夹紧后的值（非数值原样返回）。
+    """
+    bounds = _SETTINGS_BOUNDS.get(path)
+    if bounds is None or not isinstance(value, (int, float)) or isinstance(value, bool):
+        return value
+    low, high = bounds
+    if value < low:
+        return type(value)(low)
+    if value > high:
+        return type(value)(high)
+    return value
+
+
+def config_snapshot() -> dict[str, Any]:
+    """当前配置的纯数据快照（页面回填用，不返回 AstrBotConfig 对象）。
+
+    Returns:
+        可直接 JSON 序列化的字典。
+    """
+    config = RUNTIME.config
+    if not isinstance(config, dict):
+        return {}
+    try:
+        return json.loads(json.dumps(config, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return {
+            key: value
+            for key, value in config.items()
+            if isinstance(value, (str, int, float, bool, list, dict))
+        }
 
 
 def update_settings(payload: Any) -> dict[str, Any]:
-    """把页面上的设置写回插件配置（只允许 `_SETTINGS_SPEC` 里的键）。
+    """把页面上的设置写回插件配置。
+
+    可写范围**完全由 `_conf_schema.json` 决定**：schema 里没有的键一律忽略（防后门），
+    schema 里有的键按 type 转换、按 `_SETTINGS_BOUNDS` 夹紧。
 
     Args:
-        payload: `{"promotion": {...}, "review": {...}}`，可只带其中一组。
+        payload: 形如 `{"mode": "hint", "aggregation": {"debounce_time": 2.5}}`。
 
     Returns:
-        `{"changed": {...}, "promotion": 视图, "review": 最新报告}`。
+        `{"changed": {...}, "promotion": 视图, "review": 最新报告, "config": 快照}`。
 
     Raises:
-        ValueError: 负载结构不对。
+        ValueError: 负载不是对象，或 schema 不可用。
     """
     if not isinstance(payload, dict):
         raise ValueError("body must be an object")
-    changed: dict[str, Any] = {}
-    for group, spec in _SETTINGS_SPEC.items():
-        incoming = payload.get(group)
-        if incoming is None:
-            continue
-        if not isinstance(incoming, dict):
-            raise ValueError(f"{group} must be an object")
-        target = RUNTIME.config.get(group)
-        if not isinstance(target, dict):
-            target = {}
-            RUNTIME.config[group] = target
-        for key, value in incoming.items():
-            if key not in spec:
-                continue
-            target[key] = _coerce_setting(value, spec[key])
-            changed[f"{group}.{key}"] = target[key]
+    schema = settings_schema()
+    if not schema:
+        raise ValueError("schema unavailable")
 
-    save = getattr(RUNTIME.config, "save_config", None)
-    if callable(save) and changed:
-        try:
-            save()
-        except Exception as exc:  # noqa: BLE001 - 写盘失败只告警，内存已生效
-            logger.warning(f"[{PLUGIN_NAME}] 保存页面设置失败（本次仍生效）：{exc}")
+    changed: dict[str, Any] = {}
+    aggregation_dirty = False
+    for key, incoming in payload.items():
+        item = schema.get(key)
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind == "object":
+            if not isinstance(incoming, dict):
+                raise ValueError(f"{key} must be an object")
+            target = RUNTIME.config.get(key)
+            if not isinstance(target, dict):
+                target = {}
+                RUNTIME.config[key] = target
+            sub_items = item.get("items") if isinstance(item.get("items"), dict) else {}
+            for sub, value in incoming.items():
+                sub_spec = sub_items.get(sub)
+                if not isinstance(sub_spec, dict):
+                    continue
+                target[sub] = _clamp_setting(
+                    f"{key}.{sub}", _coerce_by_type(value, sub_spec.get("type"))
+                )
+                changed[f"{key}.{sub}"] = target[sub]
+                if key == "aggregation":
+                    aggregation_dirty = True
+        else:
+            RUNTIME.config[key] = _clamp_setting(key, _coerce_by_type(incoming, kind))
+            changed[key] = RUNTIME.config[key]
+
     if changed:
+        save = getattr(RUNTIME.config, "save_config", None)
+        if callable(save):
+            try:
+                save()
+            except Exception as exc:  # noqa: BLE001 - 写盘失败只告警，内存已生效
+                logger.warning(
+                    f"[{PLUGIN_NAME}] 保存页面设置失败（本次仍生效）：{exc}"
+                )
         logger.info(f"[{PLUGIN_NAME}] 页面设置已更新：{changed}")
-        # 刚打开放权时马上开始计时，不用等到下一个 30 分钟周期
-        if changed.get("promotion.enabled") and RUNTIME.journey is not None:
-            if RUNTIME.journey.started_at <= 0:
-                RUNTIME.journey.start(time.time(), _mode())
+
+    if aggregation_dirty:
+        service = RUNTIME.aggregation
+        if service is not None:
+            try:
+                service.apply_config(_aggregation_config())
+            except Exception as exc:  # noqa: BLE001 - 改配置不能拖垮判定
+                logger.warning(f"[{PLUGIN_NAME}] 聚合配置热更新失败（已忽略）：{exc}")
+
+    # 刚打开放权时马上开始计时，不用等到下一个 30 分钟周期
+    if changed.get("promotion.enabled") and RUNTIME.journey is not None:
+        if RUNTIME.journey.started_at <= 0:
+            RUNTIME.journey.start(time.time(), _mode())
+
     return {
         "changed": changed,
         "promotion": _promotion_view(),
         "review": _review_view(),
+        "config": config_snapshot(),
     }
 
 
@@ -1294,6 +1403,8 @@ def _init_aggregation(ctx: Context | None) -> None:
             "review_config": _review_settings_snapshot,
             "run_review": lambda: _run_review(force=True),
             "settings": update_settings,
+            "schema": settings_schema,
+            "config": config_snapshot,
         }
         RUNTIME.aggregation = service
         RUNTIME.aggregation_error = ""

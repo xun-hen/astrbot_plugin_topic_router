@@ -193,3 +193,32 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); 
   padding: 0.15rem 0.3rem;
 }
 
+
+.settings-form details {
+  margin: 0.3rem 0;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  padding-top: 0.3rem;
+}
+.settings-form summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.88rem;
+  padding: 0.2rem 0;
+}
+.settings-form .field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  margin: 0.2rem 0;
+}
+.settings-form input[type='text'],
+.settings-form input[type='number'],
+.settings-form select {
+  padding: 0.12rem 0.3rem;
+  font-size: 0.82rem;
+}
+.settings-form input[type='text'] {
+  min-width: 12rem;
+}
+

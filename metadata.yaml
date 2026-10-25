@@ -20,7 +20,7 @@ desc: |-
   - 自带真实数据评测台，阈值可以拿你自己的聊天记录来调
   - 插件详情页带聚合运行状态与统计（合并率、延迟、最近轮次）
   - 平台无关：任何能到达 LLM 的消息都适用
-version: v1.0.1
+version: v1.1.0
 author: xun-hen
 repo: https://github.com/xun-hen/astrbot_plugin_topic_router
 astrbot_version: ">=4.26"

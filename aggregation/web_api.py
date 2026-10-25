@@ -298,6 +298,35 @@ class PageApi:
         except Exception as exc:  # noqa: BLE001
             return error_response(f"review failed: {exc}", status_code=500)
 
+    # ------------------------------------------------------------------ 设置
+    async def api_schema(self) -> Any:
+        """插件配置 schema（页面据此生成「全部设置」表单）。
+
+        Returns:
+            JSON 响应。
+        """
+        schema = self._extra("schema")
+        if not callable(schema):
+            return error_response("schema unavailable", status_code=501)
+        try:
+            return json_response({"schema": schema()})
+        except Exception as exc:  # noqa: BLE001
+            return error_response(f"schema failed: {exc}", status_code=500)
+
+    async def api_config(self) -> Any:
+        """当前配置快照（表单回填用）。
+
+        Returns:
+            JSON 响应。
+        """
+        snapshot = self._extra("config")
+        if not callable(snapshot):
+            return json_response({"config": {}})
+        try:
+            return json_response({"config": snapshot()})
+        except Exception as exc:  # noqa: BLE001
+            return error_response(f"config failed: {exc}", status_code=500)
+
     async def api_settings(self) -> Any:
         """保存页面上的放权 / 复盘设置（POST）。
 
@@ -375,6 +404,8 @@ ROUTES = (
     ("/{plugin}/preset", "api_preset", ("GET",), "Current preset"),
     ("/{plugin}/promotion", "api_promotion", ("GET",), "Promotion progress"),
     ("/{plugin}/review", "api_review", ("GET",), "Latest daily review"),
+    ("/{plugin}/schema", "api_schema", ("GET",), "Plugin config schema"),
+    ("/{plugin}/config", "api_config", ("GET",), "Current plugin config"),
     ("/{plugin}/events", "api_events", ("GET",), "SSE summary"),
 )
 

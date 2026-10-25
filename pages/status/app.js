@@ -23,10 +23,9 @@ const el = {
   journey: { stage: $("journey-stage"), line: $("journey-line"), reset: $("journey-reset") },
   review: { day: $("review-day"), text: $("review-text"), run: $("review-run") },
   settings: {
-    save: $("settings-save"),
-    pEnabled: $("p-enabled"), pMark: $("p-mark-days"), pHint: $("p-hint-days"),
-    pAuto: $("p-to-auto"),
-    rEnabled: $("r-enabled"), rHour: $("r-hour"), rOnlyBeforeAuto: $("r-only-before-auto"),
+    form: $("settings-form"),
+    saveAll: $("settings-save-all"),
+    status: $("settings-status"),
   },
 };
 
@@ -250,7 +249,6 @@ async function loadAll() {
     fillPresets(preset);
     renderJourney(promotion);
     renderReview(review?.review || null);
-    fillReviewSettings(review?.config || null);
     el.dot.className = "dot ok";
   } catch (error) {
     setFatal("读取失败：" + (error?.message || error));
@@ -276,15 +274,6 @@ function renderJourney(view) {
   }
   el.journey.line.textContent = lines.join(" · ");
   el.journey.stage.textContent = view?.target_stage ? `目标 ${view.target_stage}` : "";
-
-  // 表单只在不处于"用户正在输入"时回填，避免每 5 秒轮询把输入冲掉
-  if (document.activeElement && el.settings.save.contains(document.activeElement)) return;
-  if (view && !view.error) {
-    el.settings.pEnabled.checked = !!view.enabled;
-    el.settings.pMark.value = view.mark_days ?? 3;
-    el.settings.pHint.value = view.hint_days ?? 3;
-    el.settings.pAuto.checked = view.to_auto !== false;
-  }
 }
 
 function renderReview(report) {
@@ -298,38 +287,153 @@ function renderReview(report) {
   }
 }
 
-let settingsFilled = false;
-function fillReviewSettings(view) {
-  if (settingsFilled) return;
-  el.settings.rEnabled.checked = !!view?.enabled;
-  el.settings.rHour.value = view?.hour ?? 23;
-  el.settings.rOnlyBeforeAuto.checked = view?.only_before_auto !== false;
-  settingsFilled = true;
+// ---------------------------------------------------------------- 全部设置
+// 表单是照着 /schema 生成的：新增配置项只要改 _conf_schema.json，页面自动出现控件。
+let settingsSchema = null;
+
+function fieldLabel(key, spec) {
+  return (spec && spec.description) || key.split(".").pop();
 }
 
-async function onSettingsSave() {
-  el.settings.save.disabled = true;
+function buildField(key, spec, value) {
+  const kind = (spec && spec.type) || "string";
+  const wrap = document.createElement("label");
+  wrap.className = "field";
+  let input;
+  if (kind === "bool") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!value;
+    wrap.appendChild(input);
+    const text = document.createElement("span");
+    text.textContent = fieldLabel(key, spec);
+    wrap.appendChild(text);
+  } else if (kind === "int" || kind === "float") {
+    input = document.createElement("input");
+    input.type = "number";
+    input.step = kind === "float" ? "0.1" : "1";
+    input.value = value ?? (spec && spec.default) ?? 0;
+    const text = document.createElement("span");
+    text.textContent = fieldLabel(key, spec);
+    wrap.appendChild(text);
+    wrap.appendChild(input);
+  } else if (Array.isArray(spec && spec.options) && spec.options.length) {
+    input = document.createElement("select");
+    for (const opt of spec.options) {
+      const o = document.createElement("option");
+      o.value = opt;
+      o.textContent = opt;
+      input.appendChild(o);
+    }
+    input.value = value ?? (spec && spec.default) ?? spec.options[0];
+    const text = document.createElement("span");
+    text.textContent = fieldLabel(key, spec);
+    wrap.appendChild(text);
+    wrap.appendChild(input);
+  } else if (kind === "list" || kind === "array") {
+    input = document.createElement("input");
+    input.type = "text";
+    input.value = Array.isArray(value) ? value.join(",") : (value ?? "");
+    const text = document.createElement("span");
+    text.textContent = fieldLabel(key, spec);
+    wrap.appendChild(text);
+    wrap.appendChild(input);
+  } else {
+    input = document.createElement("input");
+    input.type = "text";
+    input.value = value ?? "";
+    const text = document.createElement("span");
+    text.textContent = fieldLabel(key, spec);
+    wrap.appendChild(text);
+    wrap.appendChild(input);
+  }
+  input.dataset.key = key;
+  input.dataset.kind = kind;
+  if (spec && spec.hint) wrap.title = spec.hint;
+  return wrap;
+}
+
+function renderSettingsForm(schema, config) {
+  const host = el.settings.form;
+  host.textContent = "";
+  if (!schema) {
+    host.textContent = "读不到配置 schema（页面需要 v1.1.0 及以上版本）";
+    return;
+  }
+  for (const [key, spec] of Object.entries(schema)) {
+    if (!spec || typeof spec !== "object") continue;
+    if (spec.type === "object") {
+      const details = document.createElement("details");
+      details.open = key === "promotion";
+      const summary = document.createElement("summary");
+      summary.textContent = spec.description || key;
+      details.appendChild(summary);
+      const body = document.createElement("div");
+      body.className = "fields";
+      const groupValue = (config && config[key]) || {};
+      for (const [sub, subSpec] of Object.entries(spec.items || {})) {
+        const value = groupValue[sub] !== undefined ? groupValue[sub] : subSpec && subSpec.default;
+        body.appendChild(buildField(`${key}.${sub}`, subSpec, value));
+      }
+      details.appendChild(body);
+      host.appendChild(details);
+    } else {
+      const value = config && config[key] !== undefined ? config[key] : spec.default;
+      host.appendChild(buildField(key, spec, value));
+    }
+  }
+}
+
+function collectSettings() {
+  const payload = {};
+  for (const input of el.settings.form.querySelectorAll("[data-key]")) {
+    const key = input.dataset.key;
+    const kind = input.dataset.kind;
+    let value;
+    if (kind === "bool") value = input.checked;
+    else if (kind === "int") value = parseInt(input.value || "0", 10);
+    else if (kind === "float") value = parseFloat(input.value || "0");
+    else if (kind === "list" || kind === "array") {
+      value = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+    } else value = input.value;
+    const parts = key.split(".");
+    if (parts.length === 2) {
+      payload[parts[0]] = payload[parts[0]] || {};
+      payload[parts[0]][parts[1]] = value;
+    } else {
+      payload[key] = value;
+    }
+  }
+  return payload;
+}
+
+async function loadSettingsForm() {
   try {
-    const payload = {
-      promotion: {
-        enabled: el.settings.pEnabled.checked,
-        mark_days: Number(el.settings.pMark.value || 0),
-        hint_days: Number(el.settings.pHint.value || 0),
-        to_auto: el.settings.pAuto.checked,
-      },
-      review: {
-        enabled: el.settings.rEnabled.checked,
-        hour: Number(el.settings.rHour.value || 23),
-        only_before_auto: el.settings.rOnlyBeforeAuto.checked,
-      },
-    };
-    const saved = await bridge.apiPost("settings", payload);
+    const [schemaResp, configResp] = await Promise.all([
+      bridge.apiGet("schema"),
+      bridge.apiGet("config"),
+    ]);
+    settingsSchema = schemaResp?.schema || null;
+    renderSettingsForm(settingsSchema, configResp?.config || {});
+  } catch (error) {
+    el.settings.form.textContent = "读取设置失败：" + (error?.message || error);
+  }
+}
+
+async function onSettingsSaveAll() {
+  el.settings.saveAll.disabled = true;
+  el.settings.status.textContent = "保存中…";
+  try {
+    const saved = await bridge.apiPost("settings", collectSettings());
+    const count = Object.keys(saved?.changed || {}).length;
+    el.settings.status.textContent = count ? `已保存 ${count} 项` : "没有变化";
     if (saved?.promotion) renderJourney(saved.promotion);
+    if (saved?.config) renderSettingsForm(settingsSchema, saved.config);
     await loadAll();
   } catch (error) {
-    setFatal("保存设置失败：" + (error?.message || error));
+    el.settings.status.textContent = "保存失败：" + (error?.message || error);
   } finally {
-    el.settings.save.disabled = false;
+    el.settings.saveAll.disabled = false;
   }
 }
 
@@ -460,10 +564,11 @@ async function boot() {
   el.reset.addEventListener("click", onReset);
   el.refresh.addEventListener("click", loadAll);
   el.journey.reset.addEventListener("click", onJourneyReset);
-  el.settings.save.addEventListener("click", onSettingsSave);
+  el.settings.saveAll.addEventListener("click", onSettingsSaveAll);
   el.review.run.addEventListener("click", onReviewRun);
 
   await loadAll();
+  await loadSettingsForm();
   await startLive();
 
   // 图表/表格不是每帧都要重画，每 5 秒补一次全量

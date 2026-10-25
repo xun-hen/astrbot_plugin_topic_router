@@ -803,6 +803,24 @@ class AggregationService:
             "adaptive_max_total_wait": self.cfg.adaptive_max_total_wait,
         }
 
+    def apply_config(self, raw: dict[str, Any] | None) -> None:
+        """热更新聚合配置（页面改了 `aggregation.*` 后立即生效）。
+
+        只重算 `Config` 并把它挂回各子模块；进行中的轮次继续用旧值走完，
+        新轮次用新值——不打断用户正在等的回复。
+
+        Args:
+            raw: 新的 `aggregation` 配置字典。
+        """
+        self.cfg = load_config(raw)
+        self.store.cfg = self.cfg
+        self.stats.cfg = self.cfg
+        self.stats.track_config(stats_mod.config_hash(self.cfg))
+        self.attachments.cfg = self.cfg
+        logger.info(
+            f"[{PLUGIN_NAME}] 聚合配置已热更新 {describe_effective(self.cfg)}"
+        )
+
     # ------------------------------------------------------------------ 内部
     def _mark_seen(self, event: Any) -> None:
         """给事件打"入口执行过"标记（失败不致命，去重还有第二层）。"""
