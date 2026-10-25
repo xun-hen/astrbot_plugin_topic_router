@@ -1,5 +1,61 @@
 # 更新日志
 
+## v0.9.2
+
+**修「消息入口从未被派发」：聚合层自 v0.8.x 起一直空转，原因在插件与框架的模块路径错位。**
+
+### 一、线上现象
+
+- 消息入口 `handle_message_v090` 自插件加载以来执行 0 次（全量日志 31 万行无一条
+  "被调用"），只有 `on_llm_request` 钩子在兜底判定，所以功能看起来正常；
+- `/topicweave` 指令同样从未生效；
+- 聚合统计 `stats.json` 的 `saved_at` 长期停在旧时间，`items_total`/`flush_total`
+  恒为 0，`by_channel` 恒为空；
+- 跨平台一致（weixin 私聊 / webchat / QQ Official），属部署级现象。
+
+### 二、根因
+
+AstrBot 用 `star_map`（模块路径 → 插件元数据）把 handler 归到插件名下：
+
+1. 插件入口是 `main.py`，框架只以 `data.plugins.<目录名>.main` 登记插件元数据；
+2. 本插件所有 handler 都定义在 `router.py`，`handler_module_path` 因此是
+   `data.plugins.<目录名>.router`；
+3. `Star.__init_subclass__` 在 `class TopicRouterPlugin` 定义时按 `router` 模块路径
+   登记了一条**匿名**元数据（`name=None`），框架查 handler 时正好命中它；
+4. AstrBot 4.27+ 的 `SessionPluginManager.filter_handlers_by_session` 里有
+
+   ```python
+   if plugin.name is None:
+       continue
+   ```
+
+   —— 匿名元数据名下的 handler 被**静默丢弃**，不写日志、不抛异常。
+
+于是：所有 `AdapterMessageEvent` handler（消息入口、`/topicweave`）永远进不了
+`activated_handlers`；`OnLLMRequestEvent` 钩子不走这条过滤，所以还活着。
+
+同一根因的旁证：插件详情接口里本插件只有 `page` 组件，`command`/`hook` 组件全缺
+（`star_handler_full_names` 为空）——因为框架按 `main` 路径去查 handler，一条也查不到。
+
+> v0.9.1 的抢占检测没能暴露它，反而被它吃掉了：检测条件是"`activated_handlers`
+> 存在且**包含**本插件"，而本插件恰恰永远不在名单里，于是条件永假、零告警。
+
+### 三、修法
+
+1. `main.py` 导入时把 `router` 名下的 handler 的 `handler_module_path` 归位到
+   `main`，并清掉那条匿名元数据（`_adopt_handlers()`）。只改归属字段，不动事件类型、
+   过滤器、函数对象，派发语义不变；
+2. `on_loaded_v090` 增加**入口注册自检**：启动日志里直接给出
+   `入口自检通过 | module=... | 元数据=... | filters=...`，不通过则 WARNING 列出原因；
+3. `hook_llm_request_v090` 增加另一半抢占判据：派发计划里有别的 handler 却没有我们
+   → 记 `ENTRY_MISSING` 告警（10 分钟限流一次），把"静默失效"变成可见故障。
+
+### 四、验证
+
+- 新增 `tests/reproduce_entry_dispatch.py`：按 `data.plugins.<目录名>.main` 真实导入，
+  断言 `SessionPluginManager.filter_handlers_by_session` 不再丢弃入口；
+- 五套既有测试（207 / 16 / 9 / 16 / 23）保持全绿。
+
 ## v0.9.1
 
 **修正抢占误报：合成事件不再被当成"被更高优先级插件截走"。**

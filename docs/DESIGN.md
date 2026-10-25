@@ -433,11 +433,49 @@ v0.9.0 的第一层是**事件标记**：入口执行过 → `SEEN_ATTR`；判�
 
 这一节是本文档最有价值的部分：每一条都是**线上事故换来的**，症状都有迷惑性。
 
-### 5.1 消息入口零执行【严重，v0.8.4 定案；v0.9.0 已缓解】
+### 5.1 消息入口零执行【严重，v0.8.4 定案；**v0.9.2 才查到真因**】
 
-> **v0.9.0 状态**：入口优先级提到 1000，并保留请求钩子兜底 + 抢占告警。下面的分析仍然
-> 成立（入口可能被任何更高优先级者挡掉），但"零执行"不再等于"零判定"——钩子会补判，
-> `aggregate.preempted` 会留下证据。阅读时把"60"理解为"当时的优先级"。
+> **v0.9.2 定案**：根因不是优先级竞争，而是**模块路径错位 + 静默过滤**。
+> handler 定义在 `router.py`，插件元数据却登记在 `main.py`，框架查 handler 时命中的是
+> `Star.__init_subclass__` 留下的匿名元数据（`name=None`）；AstrBot 4.27+
+> `SessionPluginManager.filter_handlers_by_session` 里 `if plugin.name is None: continue`
+> 把它**静默丢弃**——不写日志、不抛异常。消息入口与 `/topicweave` 因此从 v0.8.x 起
+> 一次都没被派发过，聚合层整层空转。v0.9.0 的"提到 1000"、v0.9.1 的"抢占误报修复"
+> 都没碰到这个原因（后者反而因为判据要求"包含本插件"而永久失声）。
+> 修法见下一小节。
+>
+> **v0.9.0 状态（历史记录）**：入口优先级提到 1000，并保留请求钩子兜底 + 抢占告警。
+> 下面的分析仍然成立（入口可能被任何更高优先级者挡掉），但"零执行"不再等于"零判定"
+> ——钩子会补判。阅读时把"60"理解为"当时的优先级"。
+
+#### 5.1.1 真因：`star_map` 的键对不上（v0.9.2）
+
+AstrBot 用 `star_map`（模块路径 → 插件元数据）把 handler 归到插件名下：
+
+| 环节 | 实际值 |
+| --- | --- |
+| 插件元数据键（`star_manager` 只导入 main） | `data.plugins.<目录名>.main` |
+| handler 的 `handler_module_path`（取 `__module__`） | `data.plugins.<目录名>.router` |
+| 框架查 handler 时命中的元数据 | `__init_subclass__` 自动登记的匿名条目，`name=None` |
+
+`filter_handlers_by_session` 只丢 `name is None` 的 handler，其余照常放行——所以这是
+**选择性静默**：`AdapterMessageEvent` 全灭，`OnLLMRequestEvent` 钩子（不走这条过滤）照活，
+`stats.json` 停在旧时间，日志里连一条 warning 都没有。
+
+旁证（现场可自查，不需要日志权限）：插件详情接口里本插件只有 `page` 组件，
+`command`/`hook` 组件全缺——`star_handler_full_names` 为空，因为框架按 `main` 路径查 handler。
+
+修法：
+
+1. `main.py` 导入时把 `router` 名下 handler 的 `handler_module_path` 归位到 `main`，
+   并删掉那条匿名元数据（`_adopt_handlers()`）。只改归属字段，不动事件类型/过滤器/函数对象；
+2. `on_loaded_v090` 启动自检，正常打 `入口自检通过 | module=... | 元数据=... | filters=...`，
+   异常打 WARNING 并列出 `_registration_report()` 的结论；
+3. `hook_llm_request_v090` 补上另一半判据：派发计划里有别的 handler 却没有我们 →
+   `ENTRY_MISSING` 告警（10 分钟限流），把"静默失效"变成可见故障。
+
+回归测试：`tests/reproduce_entry_dispatch.py`（按 main 导入，走两道 waking_check 筛选，
+再用"改回 router 路径"反证静默丢弃确实会发生）。
 
 **症状**：插件显示已加载、配置正确、日志里有活动记录，但聊天中**完全没有任何判定**：
 没有日志、没有状态文件、没有提示，像没装一样。**群聊正常，私聊必现。**

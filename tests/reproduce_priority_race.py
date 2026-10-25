@@ -299,23 +299,46 @@ def main() -> int:
 
     from astrbot.core.star.register import star_handler as reg  # noqa: PLC0415
 
-    # 用与实机一致的包名导入插件（__module__ 决定注册键与 star_map 查找）
+    # 用与实机一致的包名导入插件（__module__ 决定注册键与 star_map 查找）。
+    # 必须导 **main**：AstrBot 的 star_manager 只导入 `data.plugins.<目录名>.main`，
+    # 本插件的 handler 归位（v0.9.2）也发生在 main 导入时。导包（__init__）测不到那条路。
     pkg_name = f"data.plugins.{PLUGIN_DIR.name}"
-    plugin_pkg = importlib.import_module(pkg_name)
+    plugin_pkg = importlib.import_module(f"{pkg_name}.main")
     router = importlib.import_module(f"{pkg_name}.router")
+
+    # star_manager 在导入之后才会建插件元数据（名字取自 metadata.yaml）。这里补上，
+    # 否则 only_activated=True 的收集会因为"查不到插件"而丢掉所有 handler。
+    from astrbot.core.star.star import StarMetadata, star_map  # noqa: PLC0415
+
+    entry_module_path = f"{pkg_name}.main"
+    if entry_module_path not in star_map:
+        star_map[entry_module_path] = StarMetadata(
+            module_path=entry_module_path,
+            name=PLUGIN_DIR.name,
+            activated=True,
+        )
 
     # ------------------------------------------------------------------ 1
     print("\n[1] 真实注册表里本插件 handler 的注册结果")
     entries = [
         h
         for h in star_handlers_registry
-        if h.handler_module_path == f"{pkg_name}.router"
+        if h.handler_module_path == entry_module_path
     ]
     for h in entries:
         print(
             f"    {h.handler_name:28s} {h.event_type.name:22s} "
             f"priority={h.extras_configs.get('priority')}"
         )
+    check("handler 全部归位到 main 模块路径", len(entries) >= 5, f"只有 {len(entries)} 条")
+    check(
+        "router 模块路径下不再有残留条目",
+        not [
+            h
+            for h in star_handlers_registry
+            if h.handler_module_path == f"{pkg_name}.router"
+        ],
+    )
     entry_md = next((h for h in entries if h.handler_name == "handle_message_v090"), None)
     check("入口 handler 已注册", entry_md is not None)
     if entry_md is None:
@@ -490,7 +513,7 @@ def main() -> int:
     print("\n[6] 另一条被忽略的路径：handler.enabled / plugin.activated 过滤")
     from astrbot.core.star.star import star_map  # noqa: PLC0415
 
-    plugin_md = star_map.get(f"{pkg_name}.router")
+    plugin_md = star_map.get(f"{pkg_name}.main")
     print(f"    star_map 命中: {plugin_md is not None}")
     if plugin_md is not None:
         print(f"    plugin.name={plugin_md.name!r} activated={plugin_md.activated}")

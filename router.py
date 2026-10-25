@@ -194,6 +194,12 @@ MESSAGE_HANDLER_NAME = "handle_message_v090"
 合成事件（主动回复、其它插件直接 `request_llm`）不在派发计划里，不能算抢占。
 """
 
+_DISPATCH_WARN_INTERVAL = 600.0
+"""“入口不在派发计划里”告警的最小间隔（秒）。"""
+
+_dispatch_warn_at = 0.0
+"""上次告警的时间戳（`time.monotonic()`），用于限流。"""
+
 
 
 def _hook_user_message(event: Any, req: Any) -> str:
@@ -566,6 +572,156 @@ def _event_marked(event: Any, attr: str) -> bool:
         return bool(getattr(event, attr, False))
     except Exception:  # noqa: BLE001
         return False
+
+
+def _activated_handler_names(event: Any) -> list[str]:
+    """读出本次消息的派发计划里的 handler 名字。
+
+    `waking_check` 把最终名单写进事件的 `activated_handlers` extra（`star_request`
+    随后就按它逐个执行）。拿到它就等于拿到"框架这次到底有没有排我们"。
+
+    Args:
+        event: 消息事件（`on_llm_request` 钩子拿到的也是同一个事件实例）。
+
+    Returns:
+        handler 名字列表；框架没写这个 extra 时返回空列表。
+    """
+    if event is None:
+        return []
+    try:
+        handlers = event.get_extra("activated_handlers")
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(handlers, (list, tuple)):
+        return []
+    names: list[str] = []
+    for handler in handlers:
+        name = getattr(handler, "handler_name", None)
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
+
+
+def _warn_if_entry_absent_from_plan(event: Any) -> None:
+    """派发计划里没有消息入口时告警（这是 v0.8.x 起的真实故障形态）。
+
+    v0.9.1 的抢占检测要求"`activated_handlers` 存在且**包含**本插件"，所以当
+    handler 因为元数据 `name=None` 被 `SessionPluginManager` 静默丢弃时，它反而
+    **不会**报警——报警条件本身被这个故障吃掉了。这里补上另一半：计划里明明有
+    别的 handler，却没有我们，那就是注册/meta 层面的问题，必须可见。
+
+    同一个进程里最多每 `_DISPATCH_WARN_INTERVAL` 秒报一次，避免每条消息刷屏。
+
+    Args:
+        event: 消息事件。
+    """
+    global _dispatch_warn_at
+    names = _activated_handler_names(event)
+    if not names or MESSAGE_HANDLER_NAME in names:
+        return
+    now = time.monotonic()
+    if now - _dispatch_warn_at < _DISPATCH_WARN_INTERVAL:
+        return
+    _dispatch_warn_at = now
+
+    report = _registration_report()
+    problems = "；".join(report.get("problems") or []) or "未知（注册表读不到）"
+    logger.warning(
+        f"[{PLUGIN_NAME}] 消息入口 {MESSAGE_HANDLER_NAME} 不在本次派发计划里"
+        f"（计划里有 {len(names)} 个 handler：{', '.join(names[:8])}）"
+        f" | 注册表诊断：{problems}"
+        f" | 聚合与 /topicweave 会静默失效，请把这一行连同 AstrBot 版本一起反馈"
+    )
+    _trace(
+        "ENTRY_MISSING",
+        str(getattr(event, "unified_msg_origin", "-")),
+        f"| v={PLUGIN_VERSION} | names={names[:8]} | problems={problems}",
+    )
+
+
+def _registration_report() -> dict[str, Any]:
+    """把本插件 handler 在框架注册表里的真实落点整理成一份报告。
+
+    这个函数存在的理由：v0.8.x 到 v0.9.1 的"消息入口从不执行"是**完全静默**的
+    ——没有异常、没有 warning。原因是 handler 注册在 `router` 模块路径下，而框架
+    的插件元数据登记在 `main` 模块路径下，两者对不上时 `star_map` 里那条匿名元数据
+    `name=None`，`SessionPluginManager.filter_handlers_by_session` 会静默跳过它
+    （见 `main.py` 文件头）。启动时把这份报告打进日志，同类故障就不会再无声无息。
+
+    Returns:
+        报告字典；`ok=False` 时 `problems` 里是给人看的结论。
+    """
+    try:
+        from astrbot.core.star.star import star_map
+        from astrbot.core.star.star_handler import EventType, star_handlers_registry
+    except Exception as exc:  # noqa: BLE001 - 离线环境没有框架
+        return {"ok": False, "available": False, "problems": [f"读不到框架注册表：{exc}"]}
+
+    entry = None
+    for handler in star_handlers_registry:
+        if (
+            getattr(handler, "handler_name", "") == MESSAGE_HANDLER_NAME
+            and "topic_router" in getattr(handler, "handler_full_name", "")
+        ):
+            entry = handler
+            break
+
+    report: dict[str, Any] = {
+        "ok": False,
+        "available": True,
+        "entry_found": entry is not None,
+        "handler_module_path": getattr(entry, "handler_module_path", None),
+        "enabled": bool(getattr(entry, "enabled", False)),
+        "filters": len(getattr(entry, "event_filters", []) or []),
+        "problems": [],
+    }
+
+    if entry is None:
+        report["problems"].append(
+            f"注册表里找不到 {MESSAGE_HANDLER_NAME}（插件可能没加载完，或被旧版本顶掉）"
+        )
+        return report
+
+    module_path = report["handler_module_path"] or ""
+    meta = star_map.get(module_path)
+    report["metadata_name"] = getattr(meta, "name", None)
+    report["metadata_module_path"] = getattr(meta, "module_path", None)
+    report["metadata_count"] = len(
+        [key for key in star_map if "topic_router" in key]
+    )
+
+    if meta is None:
+        report["problems"].append(
+            f"star_map 里没有 {module_path!r}：框架查不到 handler 所属插件"
+        )
+    else:
+        if not getattr(meta, "name", None):
+            report["problems"].append(
+                "handler 所属元数据的 name 为空：AstrBot 4.27+ 的会话级插件过滤会"
+                "静默丢弃该 handler（消息入口与 /topicweave 都不会被派发）"
+            )
+        if report["metadata_module_path"] and module_path != report["metadata_module_path"]:
+            report["problems"].append(
+                f"handler 模块路径({module_path}) 与插件元数据模块路径"
+                f"({report['metadata_module_path']}) 不一致"
+            )
+    if not report["enabled"]:
+        report["problems"].append("handler.enabled=False（可能被面板的指令开关关掉了）")
+    if report["filters"] == 0:
+        report["problems"].append("event_filters 为空：waking_check 会直接跳过")
+
+    try:
+        in_plan = entry in star_handlers_registry.get_handlers_by_event_type(
+            EventType.AdapterMessageEvent
+        )
+    except Exception:  # noqa: BLE001
+        in_plan = False
+    report["in_adapter_message_plan"] = in_plan
+    if not in_plan:
+        report["problems"].append("不在 AdapterMessageEvent 的候选名单里")
+
+    report["ok"] = not report["problems"]
+    return report
 
 
 def _aggregation_config() -> dict[str, Any]:
@@ -1581,6 +1737,10 @@ async def hook_llm_request_v090(*args: Any, **kwargs: Any) -> None:
 
     # --- 1) 抢占检测：入口没跑就等于被更高优先级者挤掉了 ---
     seen = event is not None and _event_marked(event, SEEN_ATTR)
+    if event is not None and not seen:
+        # 先区分"没进本次派发计划"与"进了计划但没执行"：
+        # 前者是注册/metadata 层面的问题（v0.8.x 起实际发生的那种），后者才是抢占。
+        _warn_if_entry_absent_from_plan(event)
     if event is not None and not seen and service is not None:
         try:
             if service.check_preempted(event):
@@ -1720,6 +1880,24 @@ async def on_loaded_v090(*args: Any, **kwargs: Any) -> None:
         logger.info(
             f"[{PLUGIN_NAME}] 可用的模型 ID（可直接填进 provider_id）："
             + "、".join(ids[:20])
+        )
+
+    # 入口注册自检：把"框架到底认不认我们的 handler"在启动时就变成一行明确结论。
+    # v0.8.x 到 v0.9.1 的问题恰恰是这里没有任何输出——入口一次都没执行，日志里却
+    # 只有"加载成功"。
+    report = _registration_report()
+    if report.get("ok"):
+        logger.info(
+            f"[{PLUGIN_NAME}] 入口自检通过 | module={report.get('handler_module_path')} "
+            f"| 元数据={report.get('metadata_name')} "
+            f"| filters={report.get('filters')} | 元数据条目="
+            f"{report.get('metadata_count')}"
+        )
+    elif report.get("available", True):
+        logger.warning(
+            f"[{PLUGIN_NAME}] ⚠ 入口自检未通过："
+            + "；".join(report.get("problems") or ["未知"])
+            + " —— 聚合会整层空转，消息入口与 /topicweave 都不会被派发"
         )
 
 
