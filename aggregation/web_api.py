@@ -264,16 +264,22 @@ class PageApi:
             return error_response(f"promotion reset failed: {exc}", status_code=500)
 
     async def api_review(self) -> Any:
-        """最新一份每日复盘（GET）。
+        """最新一份每日复盘 + 复盘配置（GET）。
 
         Returns:
             JSON 响应。
         """
         view = self._extra("review")
+        config = self._extra("review_config")
         if not callable(view):
-            return json_response({"review": None})
+            return json_response({"review": None, "config": None})
         try:
-            return json_response({"review": view()})
+            return json_response(
+                {
+                    "review": view(),
+                    "config": config() if callable(config) else None,
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             return error_response(f"review view failed: {exc}", status_code=500)
 
@@ -291,6 +297,26 @@ class PageApi:
             return json_response({"review": report})
         except Exception as exc:  # noqa: BLE001
             return error_response(f"review failed: {exc}", status_code=500)
+
+    async def api_settings(self) -> Any:
+        """保存页面上的放权 / 复盘设置（POST）。
+
+        Returns:
+            JSON 响应或错误响应。
+        """
+        update = self._extra("settings")
+        if not callable(update):
+            return error_response("settings unavailable", status_code=501)
+        try:
+            payload = await request.json(default={})
+        except Exception as exc:  # noqa: BLE001
+            return self._bad_request("settings", f"invalid body: {exc}")
+        try:
+            return json_response(update(payload))
+        except ValueError as exc:
+            return self._bad_request("settings", str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return error_response(f"settings failed: {exc}", status_code=500)
 
     # ------------------------------------------------------------------ SSE
     async def api_events(self) -> Any:
@@ -401,8 +427,14 @@ def register(context: Any, plugin: Any) -> bool:
             ["POST"],
             "Run daily review now",
         )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/settings",
+            api.api_settings,
+            ["POST"],
+            "Save promotion/review settings",
+        )
     except Exception as exc:  # noqa: BLE001 - 页面不可用不能拖垮插件
         logger.exception(f"[{PLUGIN_NAME}] 注册页面后端失败：{exc}")
         return False
-    logger.info(f"[{PLUGIN_NAME}] 页面后端已注册 {len(ROUTES) + 4} 个路由")
+    logger.info(f"[{PLUGIN_NAME}] 页面后端已注册 {len(ROUTES) + 5} 个路由")
     return True

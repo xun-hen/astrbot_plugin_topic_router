@@ -51,13 +51,28 @@
     <section class="panel">
       <h2>阶梯放权 <span class="muted" id="journey-stage"></span></h2>
       <p class="muted" id="journey-line">加载中…</p>
+      <div class="fields">
+        <label><input type="checkbox" id="p-enabled"> 启用</label>
+        <label>mark 天数 <input type="number" id="p-mark-days" min="0" max="365" step="0.5"></label>
+        <label>hint 天数 <input type="number" id="p-hint-days" min="0" max="365" step="0.5"></label>
+        <label><input type="checkbox" id="p-to-auto"> 最终进 auto</label>
+      </div>
       <div class="row">
+        <button id="settings-save" class="ghost" type="button">保存设置</button>
         <button id="journey-reset" class="ghost" type="button">重新计时</button>
       </div>
     </section>
 
     <section class="panel">
       <h2>每日复盘 <span class="muted" id="review-day"></span></h2>
+      <div class="fields">
+        <label><input type="checkbox" id="r-enabled"> 启用</label>
+        <label>每天几点 <input type="number" id="r-hour" min="0" max="23" step="1"></label>
+        <label><input type="checkbox" id="r-only-before-auto"> 仅 auto 之前</label>
+      </div>
+      <div class="row">
+        <button id="review-run" class="ghost" type="button">立即生成</button>
+      </div>
       <pre id="review-text" class="review">暂无复盘。在插件配置里打开「每日复盘」后，每天会生成一份。</pre>
     </section>
 

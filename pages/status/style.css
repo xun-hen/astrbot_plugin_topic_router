@@ -175,3 +175,21 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); 
   margin: 0;
 }
 
+
+.fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.2rem;
+  margin: 0.4rem 0 0.6rem;
+  font-size: 0.85rem;
+}
+.fields label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.fields input[type='number'] {
+  width: 5.2rem;
+  padding: 0.15rem 0.3rem;
+}
+

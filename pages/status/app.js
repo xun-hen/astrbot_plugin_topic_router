@@ -21,7 +21,13 @@ const el = {
   rounds: $("rounds"), roundsCount: $("rounds-count"), roundsEmpty: $("rounds-empty"),
   history: $("history"), historyEmpty: $("history-empty"),
   journey: { stage: $("journey-stage"), line: $("journey-line"), reset: $("journey-reset") },
-  review: { day: $("review-day"), text: $("review-text") },
+  review: { day: $("review-day"), text: $("review-text"), run: $("review-run") },
+  settings: {
+    save: $("settings-save"),
+    pEnabled: $("p-enabled"), pMark: $("p-mark-days"), pHint: $("p-hint-days"),
+    pAuto: $("p-to-auto"),
+    rEnabled: $("r-enabled"), rHour: $("r-hour"), rOnlyBeforeAuto: $("r-only-before-auto"),
+  },
 };
 
 let subscriptionId = null;
@@ -244,6 +250,7 @@ async function loadAll() {
     fillPresets(preset);
     renderJourney(promotion);
     renderReview(review?.review || null);
+    fillReviewSettings(review?.config || null);
     el.dot.className = "dot ok";
   } catch (error) {
     setFatal("读取失败：" + (error?.message || error));
@@ -255,7 +262,7 @@ function renderJourney(view) {
   if (!view || view.error) {
     lines.push("放权状态不可用：" + (view?.error || "未知"));
   } else if (!view.enabled) {
-    lines.push("未启用（在插件配置 → 阶梯放权 里打开）");
+    lines.push("未启用（勾选下面的「启用」并保存即可开始计时）");
   } else {
     lines.push(
       `当前 ${view.current_mode} · 已运行 ${view.elapsed_days} 天 · 目标 ${view.target_stage}`
@@ -269,17 +276,73 @@ function renderJourney(view) {
   }
   el.journey.line.textContent = lines.join(" · ");
   el.journey.stage.textContent = view?.target_stage ? `目标 ${view.target_stage}` : "";
+
+  // 表单只在不处于"用户正在输入"时回填，避免每 5 秒轮询把输入冲掉
+  if (document.activeElement && el.settings.save.contains(document.activeElement)) return;
+  if (view && !view.error) {
+    el.settings.pEnabled.checked = !!view.enabled;
+    el.settings.pMark.value = view.mark_days ?? 3;
+    el.settings.pHint.value = view.hint_days ?? 3;
+    el.settings.pAuto.checked = view.to_auto !== false;
+  }
 }
 
 function renderReview(report) {
   if (!report || !report.text) {
     el.review.day.textContent = "";
     el.review.text.textContent =
-      "暂无复盘。在插件配置里打开「每日复盘」后，每天会生成一份。";
-    return;
+      "暂无复盘。打开「每日复盘」后，每天会生成一份；也可以点下面的「立即生成」。";
+  } else {
+    el.review.day.textContent = report.day || "";
+    el.review.text.textContent = report.text;
   }
-  el.review.day.textContent = report.day || "";
-  el.review.text.textContent = report.text;
+}
+
+let settingsFilled = false;
+function fillReviewSettings(view) {
+  if (settingsFilled) return;
+  el.settings.rEnabled.checked = !!view?.enabled;
+  el.settings.rHour.value = view?.hour ?? 23;
+  el.settings.rOnlyBeforeAuto.checked = view?.only_before_auto !== false;
+  settingsFilled = true;
+}
+
+async function onSettingsSave() {
+  el.settings.save.disabled = true;
+  try {
+    const payload = {
+      promotion: {
+        enabled: el.settings.pEnabled.checked,
+        mark_days: Number(el.settings.pMark.value || 0),
+        hint_days: Number(el.settings.pHint.value || 0),
+        to_auto: el.settings.pAuto.checked,
+      },
+      review: {
+        enabled: el.settings.rEnabled.checked,
+        hour: Number(el.settings.rHour.value || 23),
+        only_before_auto: el.settings.rOnlyBeforeAuto.checked,
+      },
+    };
+    const saved = await bridge.apiPost("settings", payload);
+    if (saved?.promotion) renderJourney(saved.promotion);
+    await loadAll();
+  } catch (error) {
+    setFatal("保存设置失败：" + (error?.message || error));
+  } finally {
+    el.settings.save.disabled = false;
+  }
+}
+
+async function onReviewRun() {
+  el.review.run.disabled = true;
+  try {
+    await bridge.apiPost("review/run", {});
+    await loadAll();
+  } catch (error) {
+    setFatal("生成复盘失败：" + (error?.message || error));
+  } finally {
+    el.review.run.disabled = false;
+  }
 }
 
 async function onJourneyReset() {
@@ -397,6 +460,8 @@ async function boot() {
   el.reset.addEventListener("click", onReset);
   el.refresh.addEventListener("click", loadAll);
   el.journey.reset.addEventListener("click", onJourneyReset);
+  el.settings.save.addEventListener("click", onSettingsSave);
+  el.review.run.addEventListener("click", onReviewRun);
 
   await loadAll();
   await startLive();
@@ -406,3 +471,4 @@ async function boot() {
 }
 
 boot();
+

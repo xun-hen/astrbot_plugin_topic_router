@@ -867,6 +867,143 @@ def _promotion_view() -> dict[str, Any]:
     return journey.stage_view(time.time(), plan, _mode())
 
 
+_SETTINGS_SPEC: dict[str, dict[str, Any]] = {
+    "promotion": {
+        "enabled": "bool",
+        "mark_days": ("float", 0.0, 365.0),
+        "hint_days": ("float", 0.0, 365.0),
+        "to_auto": "bool",
+    },
+    "review": {
+        "enabled": "bool",
+        "hour": ("int", 0, 23),
+        "only_before_auto": "bool",
+        "keep_days": ("int", 1, 365),
+        "provider_id": "str",
+    },
+}
+"""页面可改的配置白名单：键 -> 类型（或 `(类型, 下界, 上界)`）。
+
+只允许改这两组里的这几个键：页面是只读视图 + 少量开关，不能变成"随便改插件配置"
+的后门。
+"""
+
+
+def _coerce_setting(value: Any, spec: Any) -> Any:
+    """按白名单把页面传来的值转成正确类型（越界抛 ValueError）。
+
+    Args:
+        value: 页面传来的原始值。
+        spec: 类型说明。
+
+    Returns:
+        转换后的值。
+
+    Raises:
+        ValueError: 类型不对或超出范围。
+    """
+    if spec == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    if spec == "str":
+        return str(value or "")
+    kind, low, high = spec
+    if kind == "int":
+        got = int(round(float(value)))
+    else:
+        got = float(value)
+    if got < low:
+        got = low
+    if got > high:
+        got = high
+    return got
+
+
+def update_settings(payload: Any) -> dict[str, Any]:
+    """把页面上的设置写回插件配置（只允许 `_SETTINGS_SPEC` 里的键）。
+
+    Args:
+        payload: `{"promotion": {...}, "review": {...}}`，可只带其中一组。
+
+    Returns:
+        `{"changed": {...}, "promotion": 视图, "review": 最新报告}`。
+
+    Raises:
+        ValueError: 负载结构不对。
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("body must be an object")
+    changed: dict[str, Any] = {}
+    for group, spec in _SETTINGS_SPEC.items():
+        incoming = payload.get(group)
+        if incoming is None:
+            continue
+        if not isinstance(incoming, dict):
+            raise ValueError(f"{group} must be an object")
+        target = RUNTIME.config.get(group)
+        if not isinstance(target, dict):
+            target = {}
+            RUNTIME.config[group] = target
+        for key, value in incoming.items():
+            if key not in spec:
+                continue
+            target[key] = _coerce_setting(value, spec[key])
+            changed[f"{group}.{key}"] = target[key]
+
+    save = getattr(RUNTIME.config, "save_config", None)
+    if callable(save) and changed:
+        try:
+            save()
+        except Exception as exc:  # noqa: BLE001 - 写盘失败只告警，内存已生效
+            logger.warning(f"[{PLUGIN_NAME}] 保存页面设置失败（本次仍生效）：{exc}")
+    if changed:
+        logger.info(f"[{PLUGIN_NAME}] 页面设置已更新：{changed}")
+        # 刚打开放权时马上开始计时，不用等到下一个 30 分钟周期
+        if changed.get("promotion.enabled") and RUNTIME.journey is not None:
+            if RUNTIME.journey.started_at <= 0:
+                RUNTIME.journey.start(time.time(), _mode())
+    return {
+        "changed": changed,
+        "promotion": _promotion_view(),
+        "review": _review_view(),
+    }
+
+
+def _review_settings_snapshot() -> dict[str, Any]:
+    """当前复盘配置的只读快照（页面表单回填用）。
+
+    Returns:
+        归一化后的配置字典。
+    """
+    cfg = _review_config()
+
+    def flag(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return default
+
+    try:
+        hour = max(0, min(23, int(cfg.get("hour", 23) or 23)))
+    except (TypeError, ValueError):
+        hour = 23
+    try:
+        keep = max(1, int(cfg.get("keep_days", 14) or 14))
+    except (TypeError, ValueError):
+        keep = 14
+    return {
+        "enabled": flag(cfg.get("enabled"), False),
+        "hour": hour,
+        "only_before_auto": flag(cfg.get("only_before_auto"), True),
+        "provider_id": str(cfg.get("provider_id") or ""),
+        "keep_days": keep,
+    }
+
+
 async def _promotion_reset() -> dict[str, Any]:
     """重置放权计时（从当前模式重新开始数天数）。
 
@@ -1154,7 +1291,9 @@ def _init_aggregation(ctx: Context | None) -> None:
             "promotion": _promotion_view,
             "promotion_reset": _promotion_reset,
             "review": _review_view,
+            "review_config": _review_settings_snapshot,
             "run_review": lambda: _run_review(force=True),
+            "settings": update_settings,
         }
         RUNTIME.aggregation = service
         RUNTIME.aggregation_error = ""

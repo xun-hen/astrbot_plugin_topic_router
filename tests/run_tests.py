@@ -1,4 +1,4 @@
-"""离线测试：不启动 AstrBot，用假 context/event 跑通判定与动作层。
+﻿"""离线测试：不启动 AstrBot，用假 context/event 跑通判定与动作层。
 
 跑法（需要用 AstrBot 自带的 Python 运行时，才能 import 到真实的 astrbot 模块）：
 
@@ -1858,6 +1858,49 @@ async def test_promotion_and_review(module) -> None:
         check("检测到手动改档后暂停", paused is None and journey2.paused is True,
               f"{paused} paused={journey2.paused}")
 
+        # 页面设置写回（白名单 + 夹紧 + 落盘）
+        original_settings_cfg = MODULE.RUNTIME.config
+
+        class _SettingsCfg(dict):
+            """带 save_config 的假配置。"""
+
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.saved = 0
+
+            def save_config(self) -> None:
+                """记录落盘次数。"""
+                self.saved += 1
+
+        settings_cfg = _SettingsCfg({'promotion': {}, 'review': {}})
+        MODULE.RUNTIME.config = settings_cfg
+        try:
+            saved = MODULE.update_settings(
+                {
+                    'promotion': {'enabled': True, 'mark_days': -5, 'junk': 1},
+                    'review': {'hour': 99},
+                }
+            )
+            check(
+                '设置：白名单外的键被忽略',
+                'promotion.junk' not in saved['changed'],
+                str(saved['changed']),
+            )
+            check(
+                '设置：负天数夹紧到 0',
+                settings_cfg['promotion']['mark_days'] == 0.0,
+                str(settings_cfg['promotion']),
+            )
+            check(
+                '设置：小时夹紧到 23',
+                settings_cfg['review']['hour'] == 23,
+                str(settings_cfg['review']),
+            )
+            check('设置：写回触发 save_config', settings_cfg.saved == 1,
+                  str(settings_cfg.saved))
+        finally:
+            MODULE.RUNTIME.config = original_settings_cfg
+
         # 每日复盘：流水 + 统计 + 兜底摘要
         log = daily_mod.JudgmentLog(tmp / "review" / "logs", keep_days=3)
         for idx in range(4):
@@ -2082,8 +2125,8 @@ async def test_aggregation_integration(module) -> None:
     web_ctx = FakeWebCtx()
     web_api.register(web_ctx, service)
     check(
-        "页面后端注册 11 个路由（含放权/复盘）",
-        len(web_ctx.routes) == 11,
+        "页面后端注册 12 个路由（含放权/复盘/设置）",
+        len(web_ctx.routes) == 12,
         str(web_ctx.routes),
     )
     check(
@@ -2315,4 +2358,5 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
+
 
