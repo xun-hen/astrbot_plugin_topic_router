@@ -70,10 +70,14 @@ AstrBot 的处理器循环遇到 `event.is_stopped()` 就会 `break`。只要有
 - 但仍**不把"先跑"当保证**：请求钩子会检查入口标记，没跑就兜底判定，并落
   `aggregate.preempted` 告警与 `preempted_total` 计数——失败从静默变成可见。
 
-> ⚠️ 历史结论（v0.8.4）：升级前消息入口在真机上一次都没进入函数体
-> （`ENTRY`=0、`VERDICT` 全部 `via=hook`）。当时入口优先级是 60，低于框架内置的
-> `handle_session_control_agent`（`sys.maxsize`）。v0.9.0 把入口抬到 1000 并保留钩子兜底；
-> 证据链见 [docs/evidence-entry-never-runs.md](https://github.com/xun-hen/astrbot_plugin_topic_router/blob/main/docs/evidence-entry-never-runs.md)。
+> ⚠️ 更正（v0.9.2）：上面的"优先级被抢"不是 v0.8.4 那台机器上入口零执行的真正原因。
+> 真因是 **handler 注册在 `router` 模块路径、插件元数据却登记在 `main`**，框架命中的
+> 是 `Star.__init_subclass__` 留下的匿名元数据（`name=None`），AstrBot 4.27+ 的
+> `SessionPluginManager.filter_handlers_by_session` 会**静默丢弃**它——没有异常、没有警告，
+> 钩子（不走这条过滤）照常工作，所以看起来"插件在跑"。v0.9.2 在 `main.py` 里把 handler
+> 归位到 `main` 并把这条链路写进启动自检；历史分析见
+> [docs/evidence-entry-never-runs.md](https://github.com/xun-hen/astrbot_plugin_topic_router/blob/main/docs/evidence-entry-never-runs.md)
+> 与 [docs/DESIGN.md §5.1](https://github.com/xun-hen/astrbot_plugin_topic_router/blob/main/docs/DESIGN.md)。
 
 判定结果按会话（UMO）隔离保存，`auto` 模式只是替用户执行了一次 `/new`，旧对话完整留档。
 
@@ -528,13 +532,18 @@ export ASTRBOT_ROOT=/opt/astrbot      # 之后数据都在 /opt/astrbot/data
 发一句话给机器人，然后在 AstrBot 日志里找这两行：
 
 ```
+[话题路由器] 入口自检通过 | module=data.plugins...main | 元数据=astrbot_plugin_topic_router_pro | filters=1
 [话题路由器] handle_message_v090 被调用 | vX.Y.Z | umo=... | msg='你好' | stopped=False | 聚合=开
 [话题路由器] NEW-TOPIC | webchat:... | confidence=0.90 | source=llm | topic=... | ...
 ```
 
-再发一句**接着刚才话题**的话，第二行应该变成 `CONTINUE`。
+再发一句**接着刚才话题**的话，第三行应该变成 `CONTINUE`。
 
 也可以用指令自查：发给机器人 `/topicweave`，会回一份当前话题状态。
+
+如果只看到 `hook_llm_request_v090 被调用`、看不到 `handle_message_v090 被调用`，
+说明消息入口没被派发（v0.9.2 之前的老版本会**静默**这样失败）——先看启动日志里的
+`入口自检` 那一行，它会把原因直接写出来。
 
 ---
 
@@ -629,7 +638,7 @@ export ASTRBOT_ROOT=/opt/astrbot      # 之后数据都在 /opt/astrbot/data
 | --- | --- |
 | 安装时报 `FileNotFoundError: .../plugin/astrbot_plugin_topic_router_pro` | 包是用系统压缩工具打的（反斜杠条目名 / 缺目录条目）。用 `python build_zip.py` 重新打包，或直接用 release 里的包 |
 | 日志里完全没有插件的行 | 插件没装上或被禁用：去 **插件 → 插件** 看列表状态与版本 |
-| 有 `hook_llm_request_v090 被调用`，但搜不到 `handle_message_v090 被调用` | 消息入口被上游静默了。v0.9.0 起钩子会**兜底判定**并写 `aggregate.preempted`；开 `trace_enabled` 看 `trace.log`，有 `PREEMPTED` 行就是被抢占的证据。功能不受影响，只是这一条没有经过聚合 |
+| 有 `hook_llm_request_v090 被调用`，但搜不到 `handle_message_v090 被调用` | **v0.9.2 已修**（根因是 handler 注册在 `router` 模块路径、插件元数据却在 `main`，被 AstrBot 4.27+ 的会话级插件过滤静默丢弃）。仍出现就说明没升级到 v0.9.2，或又出现了同类注册问题：看启动日志的 `入口自检` 那一行，它会列出模块路径/元数据名字/filters 三处的实际值 |
 | 连发几条消息却没被合并 | 确认 `aggregation.enabled` 为 `true`；看日志 `aggregate.start` / `aggregate.flush`。群聊里只有每条都 @ 机器人（或带唤醒前缀）的消息才可能合并——未唤醒消息在唤醒阶段就被拦掉了 |
 | 机器人迟迟不回复 | 聚合在等最后一条消息：检查 `aggregation.adaptive_max_total_wait` 是否被调得极大；用户一直处于"正在输入"时由 `max_typing_wait`（默认 60s）兜底 |
 | 图片丢了 | 看日志 `attach.persist_failed`：临时文件复制失败且平台不支持 `untrack` 时会退化为 base64；仍失败则只丢该图、文本保留 |
@@ -673,7 +682,7 @@ python tests/eval_topic_detection.py --json-out before.json
 
 ## 开发与测试
 
-五套离线测试，都不需要启动 AstrBot（第一、四、五套需要 AstrBot 的 Python 环境来 import 真实代码）：
+六套离线测试，都不需要启动 AstrBot（第一、四、五、六套需要 AstrBot 的 Python 环境来 import 真实代码）：
 
 ```bash
 # 1) 插件逻辑：207 项（含跨路去重、钩子两种形态、调试模式、长空闲、落盘取证、聚合整合；需要 AstrBot 的 python）
@@ -688,10 +697,13 @@ python tests/eval_topic_detection.py --compare-legacy
 # 4) 注册表复用复现：9 项（验证 AstrBot 的 handler 注册表行为）
 python tests/reproduce_hook_dispatch.py
 
-# 5) 真实派发循环里的优先级竞争：16 项（含 sys.maxsize 内置 handler；需要 AstrBot 的 python）
+# 5) 真实派发循环里的优先级竞争：18 项（含 sys.maxsize 内置 handler；需要 AstrBot 的 python）
 python tests/reproduce_priority_race.py
 
-# 6) zip 安装流程：21 项（需要 AstrBot v4.28.1 源码，见脚本内提示）
+# 6) 入口派发回归：13 项（验证 handler 归位 main 后能过会话级过滤；含反证，需要 AstrBot 的 python）
+python tests/reproduce_entry_dispatch.py
+
+# 7) zip 安装流程：23 项（需要 AstrBot v4.28.1 源码，见脚本内提示）
 python tests/verify_zip_install.py
 ```
 

@@ -1,5 +1,13 @@
 # 入口零执行 · 定案证据（2026-10-14）
 
+> **v0.9.2 补充（2026-10-25）**：本文记录的**现象**（入口一次都没进函数体）是准确的，
+> 但当时给出的**原因**（优先级被 `sys.maxsize` 的内置会话控制抢走）不成立。真因是
+> handler 注册在 `router` 模块路径、插件元数据却登记在 `main`，框架命中的是
+> `Star.__init_subclass__` 留下的匿名元数据（`name=None`），被 AstrBot 4.27+
+> `SessionPluginManager.filter_handlers_by_session` 静默丢弃。修法与复现见
+> `docs/DESIGN.md` §5.1 与 `tests/reproduce_entry_dispatch.py`。本文其余证据仍可作为
+> "为什么当时看不出问题"的排查史料。
+
 ## 结论
 
 **`handle_message_v017`（消息事件主入口）一次都没有进入函数体。**
