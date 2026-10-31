@@ -1,5 +1,28 @@
 # 更新日志
 
+## v1.1.5
+
+**修「aggregate.preempted 误报」：唤醒前缀独占的消息不是被抢占。**
+
+- 现场（2026-10-31 18:57）：群里只发了一条 `/`，内置 `handle_empty_mention` 接走并在
+  `finally` 里 `stop_event()`，插件随即报 `aggregate.preempted dispatched=8 position=3`，
+  `prior=` 全是内置 handler——看起来像优先级不够，其实是误报；
+- 根因：`_should_have_handled` 判断"是不是指令"时用的是 `event.message_str`，而群聊里
+  `waking_check` 已经把唤醒前缀从它身上剥掉（`/` → 空串），正文只剩在消息组件里。
+  于是这条消息被当成"有正文、该聚合"，可它即使真被派发到，`handle()` 也会按指令打断；
+- 修法：新增 `_skip_reason()` 统一判定"这条为什么不该我们管"（`command` /
+  `command_in_components` / `no_content` / `wake_only` / `notice` / `group_off` /
+  `not_dispatched` / `parse_failed`），指令判定改用**组件里的正文**；
+- 观测：`aggregate.preempted` 增加 `stopped=`（此刻的静默状态）与 `msg_len=`，
+  hint 里写明"stopped=0 不代表没人停"，并点出 `prior=` 里 `handle_empty_mention` /
+  `handle_session_control_agent` 是已知会 stop 的内置 handler；
+- 新增 `aggregate.skip_not_ours`（debug）：查"这条为什么没进聚合"时直接 grep 得到原因，
+  不再只能看到"什么都没发生"；
+- 测试新增 6 项（`[19c]`）：唤醒前缀独占不报警、真·正文仍报警且计数 +1、
+  纯图片消息不被唤醒词规则误伤。六套离线测试 253 / 16 / 9 / 18 / 13 / 23 全绿。
+- **新增官方交流群 QQ 1130679595**：README 顶部、插件市场描述与 `help`、插件详情页
+  顶栏按钮（点击复制群号）与页脚都放上了，反馈 bug / 提需求直接进群。
+
 ## v1.1.4
 
 **新增「自适应间隔时间」，默认开启：窗口开始跟着用户真实的发送节奏走。**

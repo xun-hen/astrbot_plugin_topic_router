@@ -13,7 +13,7 @@ const POLL_MS = 3000;
 const $ = (id) => document.getElementById(id);
 const el = {
   dot: $("dot"), title: $("title"), live: $("live-state"), fatal: $("fatal"),
-  preset: $("preset"), reset: $("reset"), refresh: $("refresh"),
+  preset: $("preset"), reset: $("reset"), refresh: $("refresh"), group: $("group"),
   merge: $("c-merge"), flush: $("c-flush"), abort: $("c-abort"), active: $("c-active"),
   flushHint: $("c-flush-hint"),
   channels: $("channels"), drops: $("drops"), preempted: $("preempted"),
@@ -626,6 +626,44 @@ async function startLive() {
   }
 }
 
+// 官方交流群：点一下复制群号。Dashboard 常跑在 http 下，navigator.clipboard
+// 可能被浏览器禁用，所以退化到 execCommand；都失败时也把群号显示出来，不抛错。
+const QQ_GROUP = "1130679595";
+
+async function onCopyGroup() {
+  const button = el.group;
+  if (!button) return;
+  const original = button.textContent;
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(QQ_GROUP);
+      copied = true;
+    }
+  } catch (_) {
+    copied = false;
+  }
+  if (!copied) {
+    const scratch = document.createElement("textarea");
+    scratch.value = QQ_GROUP;
+    scratch.setAttribute("readonly", "");
+    scratch.style.position = "fixed";
+    scratch.style.opacity = "0";
+    document.body.appendChild(scratch);
+    scratch.select();
+    try {
+      copied = document.execCommand("copy");
+    } catch (_) {
+      copied = false;
+    }
+    scratch.remove();
+  }
+  button.textContent = copied ? `已复制 ${QQ_GROUP}` : `群号 ${QQ_GROUP}`;
+  setTimeout(() => {
+    button.textContent = original;
+  }, 1600);
+}
+
 async function boot() {
   if (!bridge) {
     setFatal(t("views.status.no_bridge",
@@ -645,6 +683,7 @@ async function boot() {
   el.preset.addEventListener("change", onPresetChange);
   el.reset.addEventListener("click", onReset);
   el.refresh.addEventListener("click", loadAll);
+  el.group?.addEventListener("click", onCopyGroup);
   el.journey.reset.addEventListener("click", onJourneyReset);
   el.settings.saveAll.addEventListener("click", onSettingsSaveAll);
   el.review.run.addEventListener("click", onReviewRun);

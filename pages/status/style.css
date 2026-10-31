@@ -99,6 +99,41 @@ h2 {
 .bar-title strong { font-size: 17px; letter-spacing: 0.01em; }
 .bar-actions { display: flex; align-items: center; gap: 8px; }
 
+/* 官方交流群：顶栏按钮 + 页脚一行，"显眼但不抢戏" */
+.group-chip {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.group-chip:hover { border-color: var(--accent); }
+.group-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 26px 0 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-soft);
+  font-size: 12.5px;
+}
+.foot b {
+  color: var(--accent-strong);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
 .dot {
   width: 9px; height: 9px; border-radius: 50%;
   background: var(--muted); flex: none;

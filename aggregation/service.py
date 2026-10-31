@@ -685,6 +685,47 @@ class AggregationService:
             index = -1
         return handlers, index
 
+    def _skip_reason(self, event: Any) -> str | None:
+        """判断"这条消息本来就不该由聚合处理"，并给出原因（排障用）。
+
+        v1.1.5：指令判定必须看**组件里的正文**，不能只看 `event.message_str`。
+        群聊里 `waking_check` 已经把唤醒前缀从 `message_str` 剥掉（用户只发 "/" 时
+        它变成空串），于是"只发了唤醒词"被当成有正文，被内置 `handle_empty_mention`
+        停下后就误报成"被抢占"——2026-10-31 18:57 那条 `aggregate.preempted`
+        就是这么来的（position=3，prior 全是内置 handler）。
+
+        Args:
+            event: 消息事件。
+
+        Returns:
+            `None` 表示该处理；否则是跳过原因：`not_dispatched` / `notice` /
+            `group_off` / `command` / `parse_failed` / `no_content` /
+            `command_in_components` / `wake_only`。
+        """
+        _handlers, index = self._dispatch_snapshot(event)
+        if index < 0:
+            return "not_dispatched"
+        if caps_mod.is_typing_notice(event) or caps_mod.is_recall_notice(event):
+            return "notice"
+        if not self._accepts(event):
+            return "group_off"
+        text = str(getattr(event, "message_str", "") or "")
+        if event_io.is_command(text, self.cfg.command_prefixes):
+            return "command"
+        try:
+            parsed = event_io.parse_incoming(event, self.cfg)
+        except Exception:  # noqa: BLE001
+            return "parse_failed"
+        if not parsed.has_content():
+            return "no_content"
+        if event_io.is_command(parsed.text(), self.cfg.command_prefixes):
+            # "/" 这类消息即使真被派发到，`handle()` 也会当指令打断，不会进聚合。
+            return "command_in_components"
+        if not text.strip() and not parsed.images():
+            # 只剩唤醒词（"bot"）或纯 @：骨架里没有可聚合的正文。
+            return "wake_only"
+        return None
+
     def _should_have_handled(self, event: Any) -> bool:
         """判断"这条消息本来该由聚合阶段处理"（抢占检测用，刻意保守）。
 
@@ -698,20 +739,7 @@ class AggregationService:
         Returns:
             True 表示如果没被抢占，本阶段本应处理它。
         """
-        _handlers, index = self._dispatch_snapshot(event)
-        if index < 0:
-            return False
-        if caps_mod.is_typing_notice(event) or caps_mod.is_recall_notice(event):
-            return False
-        if not self._accepts(event):
-            return False
-        text = str(getattr(event, "message_str", "") or "")
-        if event_io.is_command(text, self.cfg.command_prefixes):
-            return False
-        try:
-            return event_io.parse_incoming(event, self.cfg).has_content()
-        except Exception:  # noqa: BLE001
-            return False
+        return self._skip_reason(event) is None
 
     def check_preempted(self, event: Any) -> bool:
         """抢占检测：本该处理却没处理到，说明被更高优先级者挤掉了。
@@ -728,7 +756,17 @@ class AggregationService:
         """
         if getattr(event, self.seen_attr, False):
             return False
-        if not self._should_have_handled(event):
+        reason = self._skip_reason(event)
+        if reason is not None:
+            # 只对"派发计划里有我们、但这条不该我们管"记一条 debug；
+            # `not_dispatched`（Agent 重放、插件主动回复等合成事件）是最高频的
+            # 正常路径，每次都记会把 debug 日志刷满，所以跳过。
+            if reason != "not_dispatched":
+                log_event(
+                    "aggregate.skip_not_ours",
+                    umo=event_io.umo_of(event),
+                    reason=reason,
+                )
             return False
         handlers, index = self._dispatch_snapshot(event)
         prior = []
@@ -750,11 +788,17 @@ class AggregationService:
             position=index,
             msg_id=getattr(getattr(event, "message_obj", None), "message_id", "?"),
             prior=",".join(prior) or "(none)",
+            stopped=bool(getattr(event, "is_stopped", lambda: False)()),
+            msg_len=len(str(getattr(event, "message_str", "") or "")),
             hint=(
                 "本条消息未进入聚合：派发计划里有本插件，但入口没被执行"
                 "（通常是排在前面的 handler 静默了事件）。"
                 "prior= 是紧挨在本插件前面的执行者；若 position=0 仍被跳过，"
-                "说明事件在派发循环之外被消费"
+                "说明事件在派发循环之外被消费。"
+                "stopped= 是**此刻**的静默状态：内置 handler 往往在自己 await "
+                "LLM 期间触发本告警、之后才 stop_event，所以 stopped=0 不代表没人停；"
+                "真正的判据是 prior= 里出现了 handle_empty_mention / "
+                "handle_session_control_agent 这类会 stop 的内置 handler"
             ),
         )
         return True

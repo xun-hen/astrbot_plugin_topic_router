@@ -26,6 +26,7 @@ _LEVELS: dict[str, int] = {
     "aggregate.abort": 30,        # warning
     "aggregate.interrupt_timeout": 30,
     "aggregate.stale_timer": 10,
+    "aggregate.skip_not_ours": 10,
     "attach.persist_failed": 30,
     "attach.quota_exceeded": 30,
     "capability.missing": 30,

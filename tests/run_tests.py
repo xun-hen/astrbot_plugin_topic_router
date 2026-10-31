@@ -2495,6 +2495,96 @@ async def test_adaptive_interval(module) -> None:
     )
 
 
+async def test_preempt_classification(module) -> None:
+    """验证「被抢占」告警的判据（v1.1.5）。
+
+    2026-10-31 18:57 的现场：群里只发了一条 "/"（唤醒前缀），内置
+    `handle_empty_mention` 把它接走并在 finally 里 `stop_event()`，插件的
+    `aggregate.preempted` 于是报警。但那条消息**即使真被派发到**也会被
+    `handle()` 当指令打断，根本不该进聚合——报警是误报。
+
+    根因：`_should_have_handled` 用的是 `event.message_str`，而群聊里
+    `waking_check` 已经把唤醒前缀从它身上剥掉（"/" → ""），正文只剩在组件里。
+
+    这里把三类消息钉死：唤醒前缀独占（不报警）/ 真·正文（报警，计数 +1）/
+    纯图片（该管，不能被"唤醒词"规则误伤）。
+
+    Args:
+        module: 插件模块（未使用，保持签名一致）。
+    """
+    print("\n[19c] 抢占判据：唤醒前缀独占 vs 真·被抢占")
+    from astrbot.api.message_components import Image, Plain
+
+    fresh_data_root("preempt-classify")
+    make_plugin(
+        MODULE,
+        FakeContext(),
+        {"mode": "mark", "aggregation": {"enabled": True, "page_enabled": False}},
+    )
+    service = MODULE.RUNTIME.aggregation
+    check("[19c] 聚合服务可用", service is not None)
+    if service is None:
+        return
+    try:
+        class _DispatchEntry:
+            """派发计划里的本插件 handler。"""
+
+            handler_name = "handle_message_v090"
+            extras_configs = {"priority": 1000}
+
+        class _PriorEntry:
+            """排在我们前面、会 stop_event 的内置 handler。"""
+
+            handler_name = "handle_empty_mention"
+            extras_configs = {"priority": 9223372036854775806}
+
+        def _planned(event):
+            """给事件塞一份派发计划。"""
+            event.set_extra(
+                "activated_handlers", [_PriorEntry(), _DispatchEntry()]
+            )
+            return event
+
+        # ① 群里只发 "/"：message_str 被剥成空串，正文残留在组件里
+        wake_only = _planned(
+            FakeEvent("", "aiocqhttp:GroupMessage:g1", message_id="wake1")
+        )
+        wake_only.message_obj.message = [Plain("/")]
+        before = service.stats.preempted_total
+        check(
+            "唤醒前缀独占消息不算被抢占",
+            service.check_preempted(wake_only) is False,
+        )
+        check(
+            "且不计入 preempted 计数",
+            service.stats.preempted_total == before,
+            str(service.stats.preempted_total),
+        )
+
+        # ② 真·正文消息：派发计划里有我们、入口却没执行 → 必须报警
+        real = _planned(
+            FakeEvent("帮我看下 NAS 硬盘", "aiocqhttp:GroupMessage:g1", message_id="real1")
+        )
+        check("真·正文消息仍会报被抢占", service.check_preempted(real) is True)
+        check(
+            "计数 +1",
+            service.stats.preempted_total == before + 1,
+            str(service.stats.preempted_total),
+        )
+
+        # ③ 只发一张图（message_str 为空）：属于该管的消息，不能被唤醒词规则吃掉
+        image_only = _planned(
+            FakeEvent("", "aiocqhttp:GroupMessage:g1", message_id="img1")
+        )
+        image_only.message_obj.message = [Image(file="http://example.com/a.png")]
+        check(
+            "纯图片消息不会被误判为唤醒词",
+            service.check_preempted(image_only) is True,
+        )
+    finally:
+        MODULE.RUNTIME.aggregation = None
+
+
 async def main() -> int:
     """跑完所有用例。
 
@@ -2531,6 +2621,7 @@ async def main() -> int:
         await test_trace_landing(plugin_main)
         await test_aggregation_integration(plugin_main)
         await test_adaptive_interval(MODULE)
+        await test_preempt_classification(MODULE)
         await test_promotion_and_review(MODULE)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
