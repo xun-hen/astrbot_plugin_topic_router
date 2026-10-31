@@ -600,6 +600,9 @@ export ASTRBOT_ROOT=/opt/astrbot      # 之后数据都在 /opt/astrbot/data
 | `aggregation.adaptive` | `true` | 按长度、结尾标点、连续短句动态延长等待 |
 | `aggregation.adaptive_max_wait` | `6.0` | 单次等待上限 |
 | `aggregation.adaptive_max_total_wait` | `12.0` | 一轮总等待上限 |
+| `aggregation.adaptive_interval` | `true` | **按实际发送间隔自适应**：记住本会话最近几条消息的真实间隔，取 75% 分位 + 余量，窗口不够就自动拉长 |
+| `aggregation.adaptive_interval_margin` | `0.5` | 间隔自适应在上面算出的间隔上加多少余量（秒） |
+| `aggregation.adaptive_interval_samples` | `6` | 每个会话记住最近多少个相邻间隔（2~50） |
 | `aggregation.group_enabled` | `true` | 群聊是否参与合并（按「会话+发送者」分桶） |
 | `aggregation.typing_detection` | `true` | 输入状态感知（平台支持时生效） |
 | `aggregation.recall_filter` | `true` | 过滤等待期内撤回的消息 |

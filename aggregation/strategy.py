@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 # 结尾标点：句子已说完，可以稍微早点结算
 _TERMINAL_PUNCT = tuple("。！？.!?…")
@@ -34,6 +34,12 @@ _UNFINISHED_BONUS = 1.0
 > v0.9.3 首次实现时把条件写成"`tail_char` 为空才加"，而空串只出现在整轮没有
 > 文本的时候——等于这个加成从未生效。v0.9.4 改成"句末字符不属于终止标点"。
 """
+
+INTERVAL_QUANTILE = 0.75
+"""自适应间隔取的分位数：越高越保守（更兜得住用户的慢节奏），也越容易被一次走神带偏。"""
+
+INTERVAL_MIN_SAMPLES = 2
+"""少于这么多个间隔样本就不掺和——单个样本算出来的"节奏"没有意义。"""
 
 
 def adaptive_wait(
@@ -82,6 +88,41 @@ def adaptive_wait(
     return max(low, min(high, wait))
 
 
+def interval_wait(*, gaps: Sequence[float], cfg: Any) -> float:
+    """按用户最近的实际发送间隔算出等待（自适应间隔）。
+
+    `adaptive_wait()` 看的是**消息内容**（长度/标点），本函数看的是**节奏**：
+    同一个桶最近几条消息之间的真实间隔。现场反馈"一条一条回"的典型情形是
+    用户间隔 2.4~3.9 秒、窗口 2.0~3.5 秒——内容再自适应也差那 0.4 秒。
+
+    取最近 `adaptive_interval_samples` 个间隔的 75% 分位再加 `margin`：
+    分位数而不是最大值，避免一次走神（比如 9 秒）把后面所有轮次都拖长。
+
+    Args:
+        gaps: 该桶最近的相邻消息间隔（秒，旧→新）；不足 2 个时视为没有样本。
+        cfg: 配置对象（需要 adaptive_interval* 与 adaptive_min/max_wait 字段）。
+
+    Returns:
+        等待秒数；关闭、样本不足或非法时返回 0.0 表示"不参与计算"。
+    """
+    if not getattr(cfg, "adaptive_interval", False):
+        return 0.0
+    samples = [float(gap) for gap in gaps if float(gap) > 0]
+    if len(samples) < INTERVAL_MIN_SAMPLES:
+        return 0.0
+    keep = max(INTERVAL_MIN_SAMPLES, int(getattr(cfg, "adaptive_interval_samples", 6)))
+    samples = samples[-keep:]
+    ordered = sorted(samples)
+    position = int(round(INTERVAL_QUANTILE * (len(ordered) - 1)))
+    learned = ordered[min(len(ordered) - 1, max(0, position))]
+    learned += float(getattr(cfg, "adaptive_interval_margin", 0.5))
+    low = float(cfg.adaptive_min_wait)
+    high = float(cfg.adaptive_max_wait)
+    if high < low:
+        low, high = high, low
+    return max(low, min(high, learned))
+
+
 def compute(
     *,
     now: float,
@@ -91,6 +132,7 @@ def compute(
     short_streak: int,
     cooldown_remaining: float,
     cfg: Any,
+    interval_gaps: Sequence[float] = (),
 ) -> float:
     """计算本轮下一次等待秒数（文档 §8.4 的计算顺序）。
 
@@ -98,8 +140,10 @@ def compute(
 
     计算顺序（后者覆盖前者）：
     1. 非自适应 → `debounce_time`；自适应 → `adaptive_wait()`；
-    2. 总上限 → `min(w, started_at + adaptive_max_total_wait - now)`；
-    3. cooldown → `max(w, cooldown_remaining)`，仅当 `debounce < min_interval`（文档 §10.2）。
+    2. 自适应间隔 → `max(上一步, interval_wait())`，只在样本足够时参与
+       （v1.1.4：用用户最近的真实发送间隔兜住"差一点点"的连发）；
+    3. 总上限 → `min(w, started_at + adaptive_max_total_wait - now)`；
+    4. cooldown → `max(w, cooldown_remaining)`，仅当 `debounce < min_interval`（文档 §10.2）。
 
     Args:
         now: 当前时间。
@@ -109,6 +153,7 @@ def compute(
         short_streak: 连续短消息计数。
         cooldown_remaining: 同桶 cooldown 剩余秒数（<= 0 表示无）。
         cfg: 配置对象。
+        interval_gaps: 同桶最近的相邻消息间隔（秒，旧→新）；缺省表示无样本。
 
     Returns:
         等待秒数；**<= 0 表示应立即结算**，调用方直接 `_on_fire(rnd)`。
@@ -120,6 +165,10 @@ def compute(
         )
     else:
         wait = float(cfg.debounce_time)
+
+    learned = interval_wait(gaps=interval_gaps, cfg=cfg)
+    if learned > 0:
+        wait = max(wait, learned)
 
     total_left = (started_at + float(cfg.adaptive_max_total_wait)) - now
     wait = min(wait, total_left)

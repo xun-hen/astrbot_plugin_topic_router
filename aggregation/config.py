@@ -66,6 +66,9 @@ class Config:
     adaptive_min_wait: float = 1.0
     adaptive_max_wait: float = 6.0
     adaptive_max_total_wait: float = 12.0
+    adaptive_interval: bool = True
+    adaptive_interval_margin: float = 0.5
+    adaptive_interval_samples: int = 6
     short_message_threshold: int = 10
     recall_filter: bool = True
     typing_detection: bool = True
@@ -274,6 +277,13 @@ def validate(cfg: Config) -> Config:
         problems.append("min_interval_private < 0，回退 0")
         cfg = replace(cfg, min_interval_private=0.0)
 
+    # ---- 自适应间隔：只夹紧、不报错（页面滑一下不该刷 warning）----
+    cfg = replace(
+        cfg,
+        adaptive_interval_margin=_clamp(cfg.adaptive_interval_margin, 0.0, 10.0),
+        adaptive_interval_samples=int(_clamp(cfg.adaptive_interval_samples, 2, 50)),
+    )
+
     for name in ("keep_max_bytes", "keep_total_max_bytes", "keep_round_max_bytes"):
         if getattr(cfg, name) < 0:
             problems.append(f"{name} < 0，回退默认")
@@ -350,6 +360,9 @@ def describe_effective(cfg: Config) -> dict[str, Any]:
         "adaptive": cfg.adaptive,
         "adaptive_max_wait": cfg.adaptive_max_wait,
         "adaptive_max_total_wait": cfg.adaptive_max_total_wait,
+        "adaptive_interval": cfg.adaptive_interval,
+        "adaptive_interval_margin": cfg.adaptive_interval_margin,
+        "adaptive_interval_samples": cfg.adaptive_interval_samples,
         "group_enabled": cfg.group_enabled,
         "interrupt_wait": cfg.interrupt_wait,
     }

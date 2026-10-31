@@ -2317,6 +2317,184 @@ async def test_aggregation_integration(module) -> None:
     )
 
 
+async def test_adaptive_interval(module) -> None:
+    """验证「自适应间隔时间」（v1.1.4 新增，默认开启）。
+
+    三件事：
+
+    1. 纯函数：样本不足不参与、样本足够时按分位 + 余量拉长、关闭后完全不参与、
+       一轮总等待上限仍然压得住；
+    2. 存储：同桶相邻消息的真实间隔被记住、跨轮的超长间隔不进样本、样本条数按配置截断；
+    3. 配置：默认开启、非法值被夹紧（与 schema 的逐项一致由 [19] 的比对覆盖）。
+
+    Args:
+        module: 插件模块（本用例只碰聚合子模块，保持签名与其它用例一致）。
+    """
+    print("\n[19b] 自适应间隔时间（按真实发送节奏拉长窗口）")
+    strategy = sys.modules[
+        "data.plugins.astrbot_plugin_topic_router_pro.aggregation.strategy"
+    ]
+    agg_cfg = sys.modules[
+        "data.plugins.astrbot_plugin_topic_router_pro.aggregation.config"
+    ]
+    session_mod = sys.modules[
+        "data.plugins.astrbot_plugin_topic_router_pro.aggregation.session"
+    ]
+
+    cfg = agg_cfg.Config()
+    check("自适应间隔默认开启", cfg.adaptive_interval is True)
+    check("间隔余量默认 0.5s", cfg.adaptive_interval_margin == 0.5)
+    check("间隔样本默认 6 条", cfg.adaptive_interval_samples == 6)
+
+    check(
+        "样本不足时自适应间隔不参与",
+        strategy.interval_wait(gaps=[3.0], cfg=cfg) == 0.0,
+    )
+    learned = strategy.interval_wait(gaps=[2.8, 3.2, 3.9], cfg=cfg)
+    check(
+        "有样本时取 75% 分位 + 余量",
+        abs(learned - 4.4) < 1e-6,
+        str(learned),
+    )
+    check(
+        "关闭后完全不参与",
+        strategy.interval_wait(
+            gaps=[2.8, 3.2, 3.9], cfg=agg_cfg.replace(cfg, adaptive_interval=False)
+        )
+        == 0.0,
+    )
+
+    base = strategy.compute(
+        now=0.0, started_at=0.0, text_len=12, tail_char="。",
+        short_streak=0, cooldown_remaining=0.0, cfg=cfg,
+    )
+    extended = strategy.compute(
+        now=0.0, started_at=0.0, text_len=12, tail_char="。",
+        short_streak=0, cooldown_remaining=0.0, cfg=cfg,
+        interval_gaps=[2.8, 3.2, 3.9],
+    )
+    check(
+        "学到的间隔只拉长、不缩短窗口",
+        extended > base,
+        f"base={base} extended={extended}",
+    )
+    capped = strategy.compute(
+        now=11.0, started_at=0.0, text_len=12, tail_char="。",
+        short_streak=0, cooldown_remaining=0.0, cfg=cfg,
+        interval_gaps=[2.8, 3.2, 3.9],
+    )
+    check("一轮总等待上限仍然优先", abs(capped - 1.0) < 1e-6, str(capped))
+
+    clamped = agg_cfg.validate(
+        agg_cfg.replace(
+            cfg, adaptive_interval_margin=99.0, adaptive_interval_samples=1
+        )
+    )
+    check(
+        "非法余量/样本数被夹紧",
+        clamped.adaptive_interval_margin == 10.0
+        and clamped.adaptive_interval_samples == 2,
+        f"margin={clamped.adaptive_interval_margin}"
+        f" samples={clamped.adaptive_interval_samples}",
+    )
+
+    class _StubClock:
+        """可手拨的时间源（间隔样本按 arrived_at 落账，不需要真等）。"""
+
+        def __init__(self) -> None:
+            self.value = 100.0
+
+        def now(self) -> float:
+            return self.value
+
+    def _item(clock, mid: str, text: str):
+        """造一条最小消息条目（只带文本）。
+
+        Args:
+            clock: 时间源（决定 arrived_at）。
+            mid: 消息 ID。
+            text: 文本。
+
+        Returns:
+            `session.Item`。
+        """
+        return session_mod.Item(
+            message_id=mid,
+            parts=(session_mod.Part(kind="text", value=text),),
+            arrived_at=clock.now(),
+        )
+
+    clock = _StubClock()
+    store = session_mod.SessionStore(clock=clock, cfg=cfg)
+    key = ("aiocqhttp:FriendMessage:interval", "u1")
+    rnd = store.get_or_create(key, object())
+    for index, text in enumerate(("第一句", "第二句", "第三句", "第四句")):
+        if index:
+            clock.value += (2.8, 3.2, 3.9)[index - 1]
+        store.append(rnd, _item(clock, f"m{index}", text))
+    gaps = store.recent_gaps(key)
+    check(
+        "同桶相邻消息的真实间隔被记住",
+        len(gaps) == 3
+        and all(abs(a - b) < 1e-6 for a, b in zip(gaps, (2.8, 3.2, 3.9))),
+        str(gaps),
+    )
+
+    clock.value += 90.0
+    store.append(rnd, _item(clock, "m4", "很久以后的一句"))
+    check(
+        "跨轮的超长间隔不进样本",
+        len(store.recent_gaps(key)) == 3,
+        str(store.recent_gaps(key)),
+    )
+
+    small = agg_cfg.replace(cfg, adaptive_interval_samples=2)
+    clock2 = _StubClock()
+    store2 = session_mod.SessionStore(clock=clock2, cfg=small)
+    key2 = (key[0], "u2")
+    rnd2 = store2.get_or_create(key2, object())
+    for index, text in enumerate(("a", "b", "c", "d")):
+        if index:
+            clock2.value += (1.0, 2.0, 3.0)[index - 1]
+        store2.append(rnd2, _item(clock2, f"n{index}", text))
+    check(
+        "样本条数按配置截断（只留最近 N 条）",
+        len(store2.recent_gaps(key2)) == 2,
+        str(store2.recent_gaps(key2)),
+    )
+
+    # ---- 服务层接线：学到的间隔必须真的进到 _compute_wait ----
+    service_mod = sys.modules[
+        "data.plugins.astrbot_plugin_topic_router_pro.aggregation.service"
+    ]
+    wiring_clock = _StubClock()
+    service = service_mod.AggregationService(
+        None,
+        {
+            "enabled": True,
+            "adaptive": True,
+            "debounce_time": 2.0,
+            "adaptive_interval": True,
+            "adaptive_interval_margin": 0.5,
+            "adaptive_interval_samples": 6,
+        },
+        data_dir=fresh_data_root("adaptive-interval-wiring"),
+        clock=wiring_clock,
+    )
+    key3 = ("aiocqhttp:FriendMessage:wiring", "u3")
+    rnd3 = service.store.get_or_create(key3, object())
+    for index, text in enumerate(("a", "b", "c")):
+        if index:
+            wiring_clock.value += 3.4
+        service.store.append(rnd3, _item(wiring_clock, f"w{index}", text))
+    service_wait = service._compute_wait(rnd3)
+    check(
+        "服务层把学到的间隔接进了等待计算",
+        3.8 <= service_wait <= 4.0,
+        str(service_wait),
+    )
+
+
 async def main() -> int:
     """跑完所有用例。
 
@@ -2352,6 +2530,7 @@ async def main() -> int:
         await test_long_idle_gap(plugin_main)
         await test_trace_landing(plugin_main)
         await test_aggregation_integration(plugin_main)
+        await test_adaptive_interval(MODULE)
         await test_promotion_and_review(MODULE)
     except Exception:  # noqa: BLE001
         traceback.print_exc()

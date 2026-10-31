@@ -351,6 +351,7 @@ class AggregationService:
             short_streak=rnd.short_streak,
             cooldown_remaining=self.store.cooldown_remaining(rnd.key),
             cfg=self.cfg,
+            interval_gaps=self.store.recent_gaps(rnd.key),
         )
 
     def _arm_timer(self, rnd: Round, seconds: float) -> None:
@@ -365,12 +366,15 @@ class AggregationService:
         wait = max(0.0, float(seconds))
         if rnd.started_at <= 0:
             rnd.started_at = self.clock.now()
+        reason = "adaptive" if self.cfg.adaptive else "fixed"
+        if self.cfg.adaptive_interval and self.store.recent_gaps(rnd.key):
+            reason += "+interval"
         log_event(
             "aggregate.start",
             umo=rnd.key[0],
             sender=rnd.key[1],
             wait=round(wait, 2),
-            reason="adaptive" if self.cfg.adaptive else "fixed",
+            reason=reason,
         )
         rnd.timer.reset(wait)
 

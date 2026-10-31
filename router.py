@@ -877,6 +877,8 @@ _SETTINGS_BOUNDS: dict[str, tuple[float, float]] = {
     "aggregation.adaptive_min_wait": (0.0, 60.0),
     "aggregation.adaptive_max_wait": (0.0, 120.0),
     "aggregation.adaptive_max_total_wait": (0.0, 600.0),
+    "aggregation.adaptive_interval_margin": (0.0, 10.0),
+    "aggregation.adaptive_interval_samples": (2, 50),
     "aggregation.max_typing_wait": (0.0, 600.0),
     "aggregation.min_interval_group": (0.0, 60.0),
     "aggregation.min_interval_private": (0.0, 60.0),

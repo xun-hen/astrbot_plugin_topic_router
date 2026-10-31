@@ -23,6 +23,9 @@ from .config import PLUGIN_NAME
 
 BucketKey = tuple[str, str]
 
+GAP_BUCKET_LIMIT = 512
+"""间隔样本最多保留多少个桶（超出按插入顺序丢弃，防止长期运行无界增长）。"""
+
 
 class RoundState(enum.Enum):
     """轮次状态。"""
@@ -192,6 +195,13 @@ class SessionStore:
         self.finalizing: dict[int, Round] = {}
         self.index: dict[str, BucketKey] = {}
         self.cooldown: dict[BucketKey, float] = {}
+        self.gaps: dict[BucketKey, list[float]] = {}
+        """每个桶最近几条消息之间的真实间隔（秒，旧→新）。
+
+        只服务"自适应间隔"（`strategy.interval_wait`）：它不看内容，只看用户
+        打字/发送的节奏。刻意**不随轮次结束清空**——同一个人的节奏跨轮次是连续
+        的，清空反而要每轮重新学。
+        """
         self._locks: dict[BucketKey, asyncio.Lock] = {}
         self._next_round_id = 0
 
@@ -264,11 +274,38 @@ class SessionStore:
         rnd.committed_bytes += item.image_bytes
         if item.message_id:
             self.index[item.message_id] = rnd.key
+        self._record_gap(rnd, item)
         if len(item.text()) <= int(self.cfg.short_message_threshold):
             rnd.short_streak += 1
         else:
             rnd.short_streak = 0
         return True
+
+    def _record_gap(self, rnd: Round, item: Item) -> None:
+        """记录本条与上一条之间的间隔（自适应间隔的样本来源）。
+
+        只记录**同一轮内**的相邻消息：跨轮的间隔（用户隔几分钟又来说一句）说明
+        不了打字节奏，反而会把窗口撑大。上界用 `adaptive_max_total_wait` 兜底，
+        超过它的间隔直接丢弃。
+
+        Args:
+            rnd: 已追加本条之后的轮次。
+            item: 刚追加的消息。
+        """
+        if not getattr(self.cfg, "adaptive_interval", False):
+            return
+        if len(rnd.items) < 2:
+            return
+        gap = float(item.arrived_at) - float(rnd.items[-2].arrived_at)
+        if gap <= 0:
+            return
+        if gap > float(getattr(self.cfg, "adaptive_max_total_wait", 12.0)):
+            return
+        keep = max(2, int(getattr(self.cfg, "adaptive_interval_samples", 6)))
+        bucket = self.gaps.setdefault(rnd.key, [])
+        bucket.append(gap)
+        if len(bucket) > keep:
+            del bucket[: len(bucket) - keep]
 
     # ------------------------------------------------------------------ 状态转移
     def begin_finalize(self, rnd: Round) -> bool:
@@ -364,6 +401,17 @@ class SessionStore:
             logger.debug(f"[{PLUGIN_NAME}] 统计回调失败（已忽略）：{exc}")
 
     # ------------------------------------------------------------------ 查询
+    def recent_gaps(self, key: BucketKey) -> tuple[float, ...]:
+        """该桶最近的真实发送间隔（秒，旧→新）。
+
+        Args:
+            key: 桶键。
+
+        Returns:
+            间隔元组；没有样本时为空元组。
+        """
+        return tuple(self.gaps.get(key, ()))
+
     def cooldown_remaining(self, key: BucketKey) -> float:
         """同桶 cooldown 剩余秒数。
 
@@ -425,3 +473,7 @@ class SessionStore:
         now = self.clock.now()
         for key in [k for k, until in self.cooldown.items() if until <= now]:
             self.cooldown.pop(key, None)
+        # 间隔样本按桶累积、且不随轮次结束清空，因此单独兜一个上限：
+        # 超了就丢最早插入的桶（dict 保序），只影响"很久没消息"的会话回退到默认窗口。
+        while len(self.gaps) > GAP_BUCKET_LIMIT:
+            self.gaps.pop(next(iter(self.gaps)), None)
